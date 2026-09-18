@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "topo-sandbox"
+version = "2.3.0"
+description = "Kinect v1 で砂場の起伏を計測し、傾斜に応じて着色した映像を投影する TopoSandbox"
+readme = "README.md"
+requires-python = ">=3.9"
+
+# 実際に導入するバージョンは requirements.txt で固定している。
+# GPU 世代に合わせて cupy を選ぶ必要があるため、ここでは cupy を宣言しない。
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "open3d",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+# Kinect の実機を使う場合のみ必要
+kinect = ["pythonnet"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+topo-sandbox = "topo_sandbox.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # bugbear
+    "C4",     # comprehensions
+    "SIM",    # simplify
+]
+ignore = [
+    # 日本語コメントで行長が伸びやすいため、E501 は line-length のみで判定する
+    "E741",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# テスト名は日本語で書いており、pyflakes の命名規則は適用しない
+"tests/*" = ["N802"]
+
+[tool.ruff.format]
+# palette.py の配色テーブルは 1 行 5 色で並べており、そのほうが色の並びを
+# 目で追いやすい。自動整形すると 1 行 1 色に展開されてしまうため除外する。
+exclude = ["src/topo_sandbox/palette.py"]

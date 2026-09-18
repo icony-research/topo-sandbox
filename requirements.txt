@@ -1,0 +1,27 @@
+# TopoSandbox  Python 依存パッケージ（本番環境で固定しているバージョン）
+#
+#   mamba create -n ar_sandbox python=3.9
+#   mamba activate ar_sandbox
+#   pip install -r requirements.txt
+#
+# 注意 1: cupy は GPU 世代に合わせる必要がある。
+#         RTX 5070 (Blackwell / sm_120) は CUDA 11.x では動かないため cupy-cuda12x を使う。
+#
+# 注意 2: 実行時に環境変数 CUDA_PATH が CUDA 12.x を指している必要がある。
+#         マシン既定では v11.8 を指しているため、scripts/run.bat で上書きしている。
+#         Python 3.8 以降は DLL 探索に PATH を使わないため、PATH 追加では解決しない。
+#
+# 注意 3: OpenCV は CUDA 版である必要はない。コード中に cv2.cuda の使用は無い。
+
+numpy==1.23.1
+open3d==0.15.1
+Pillow==9.2.0
+opencv-python==4.11.0.86
+cupy-cuda12x==13.6.0
+
+# Kinect SDK 1.8 の Microsoft.Kinect.dll を Python から利用するために使用する
+pythonnet==3.0.5
+
+# 開発用
+pytest==8.4.2
+ruff

@@ -1,0 +1,131 @@
+# AGENTS.md
+
+AI コーディングエージェント向けの作業ガイドです。プロジェクトの概要・使い方は [README.md](README.md) を参照してください。
+
+## 前提：これは本番運用される展示物
+
+このプログラムは作者（リポジトリ所有者）が開発し、**小学校などの出前授業や展示会イベントで実際に来場者の前で動かしてきた**ものです。研究用の使い捨てプロトタイプではありません。
+
+そのため、提案・変更にあたっては次を優先してください。
+
+- **実演中に例外で止まる可能性を増やさない。**
+- **既存のキーバインドと起動手順を変えない。** 作者は現場での手順を体で覚えています。やむを得ず変える場合は必ず明示し、[README.md](README.md) のキーバインド表と「イベント当日の手順」も同時に更新してください。
+- **見た目に関わる値（配色テーブル、テクスチャ、DEM の色相範囲、解像度）を勝手に「改善」しない。** 平坦地＝市街地／斜面＝森林の貼り分けや標高の色分けは、地理の教材としての意図がある表現です。
+- 一見「未完成」に見える箇所（`c` キーの無効化など）は、誤操作防止のための意図的な措置である可能性があります。消す前に確認してください。
+
+**予備機はありません。** 旧本番機は故障により破棄され、現在の開発マシンがそのまま本番機を兼ねています。環境を壊すと代替手段がありません。
+
+## このリポジトリの要点
+
+Kinect v1 の深度画像を点群化し、傾斜に応じて彩色してプロジェクタ投影します。処理の流れは
+`sensor` → `renderer` → `app` の 3 層です。
+
+```
+src/topo_sandbox/
+  __main__.py      引数解析と起動。--replay / --near / --bench
+  app.py           Tk の画面とキー操作。ワーカスレッドで描画、メインスレッドで表示
+  renderer.py      表示モードごとの描画パイプライン。GUI から独立している
+  config.py        解像度と調整値。マジックナンバーはここに集約する
+  palette.py       配色テーブル（361 色）。生成物に近いデータなので整形対象外
+  area.py          投影エリアの保存
+  sensor/          base.py の DepthSource を kinect.py と replay.py が実装
+  processing/      depth（欠測の穴埋めと表示階調）/ plane（基準面と傾き補正）/
+                   pointcloud / coloring（GPU）/ overlays（CPU のみ）
+```
+
+**まず [renderer.py](src/topo_sandbox/renderer.py) を読んでください。** 表示モードごとの処理順序が
+すべてここにあり、仕様の中心です。
+
+## 実行・検証の方法
+
+### 実行環境（2026-09-18 時点で構築・動作確認済み）
+
+| 項目 | 値 |
+| --- | --- |
+| conda env（本番） | `ar_sandbox` — イベント直前は触らないこと |
+| conda env（実験） | `ar_sandbox_dev` — 検証はこちらで行う |
+| Python | 3.9.23（miniforge / `%USERPROFILE%\.conda\envs\...`） |
+| 主要パッケージ | numpy 1.23.1 / open3d 0.15.1 / opencv 4.11.0 / cupy-cuda12x 13.6.0 / pythonnet 3.0.5 |
+| GPU | RTX 5070 Laptop (sm_120) + CUDA 12.8 |
+| Kinect | SDK v1.8、実機接続・フレーム取得確認済み |
+
+### 起動
+
+```bat
+scripts\run.bat              通常起動
+scripts\run.bat --replay     Kinect 無しで保存画像を再生
+scripts\run.bat --bench      フレーム取得性能の実測（GUI 無し）
+```
+
+Python を直接叩く場合は **`CUDA_PATH` を CUDA 12.8 に設定**し、**`src` を `PYTHONPATH` に通す**こと。
+前者を忘れると `nvrtc64_120_0.dll` 未検出で起動に失敗します。
+
+### 検証の手順
+
+変更後は次の順に確認してください。
+
+```bat
+pytest                      Kinect も GPU も不要。CI でも回る
+ruff check .                lint
+ruff format --check .       整形の確認
+scripts\run.bat --replay    実機なしで画面まで通す
+scripts\run.bat             実機で最終確認
+```
+
+**テストがカバーしているのは GPU と Kinect を必要としない範囲だけ**です。
+彩色本体（`processing/coloring.py`）と GUI（`app.py`）は自動検証できていないため、
+ここを触ったときは必ず実機で目視確認してください。
+
+## コーディング規約
+
+- **コメント・docstring・UI 文字列・コミットメッセージは日本語**です。既存のスタイルに合わせてください。
+- 整形は `ruff format`、lint は `ruff check`。設定は [pyproject.toml](pyproject.toml) にあります。
+- 定数は [config.py](src/topo_sandbox/config.py) に集約します。関数内にマジックナンバーを直書きしないでください。
+- **なぜそうなっているかをコメントに書いてください。** このコードには「一見バグに見えるが意図的」な箇所があります（`c` キーの無効化、方向キーの符号）。理由が書かれていないと、次に読む人が「直して」しまいます。
+
+## 触る前に知っておくべき落とし穴
+
+- **解像度が連動しています。** `config.SENSOR_SIZE` (640x480) → `PROC_SIZE` (320x240) → `VIEW_SIZE` (800x600)。
+  テクスチャ画像は `VIEW_SIZE` と同じ大きさである必要があります。どれかを変えると他も連鎖して壊れます。
+- **`app._photo_image` の参照保持を消さないでください。** Tkinter の `PhotoImage` はローカル変数だと
+  GC されて画像が表示されなくなります。
+- **画像処理はワーカスレッド、描画はメインスレッド**という分離になっています。
+  Tk のウィジェット操作をワーカ側へ移さないでください。
+- **深度はミリメートルのまま扱います。** 8bit へ落とすのは画面表示用の階調を作るときだけで、
+  点群には mm を渡します。点群へ渡す前に 8bit へ丸めると、丸め幅ごとに深度が衝突して
+  砂場に実在しない崖ができ、偽の色帯になります。
+  tests/test_depth_conversion.py と tests/test_pointcloud.py で固定しています。
+- **射影変換は「センサ側の四隅」と「投影側の四隅」の 2 つで決まります。**
+  投影側を画面全体に固定すると、プロジェクタを物理的に正確へ据える必要が出ます。
+  `RenderSettings.projector_positions` を既定値のままにすると従来と同じ挙動です。
+- **基準面（`plane.ReferencePlane`）は正規化座標で保持しています。** ``depth = a*u + b*v + c``
+  の u, v は画像を 0〜1 に正規化した座標なので、あてはめた解像度と適用する解像度が
+  違っても使えます。傾きを度で出すときだけ焦点距離が要りますが、画素数と焦点距離は
+  どちらも解像度に比例するため `config.SENSOR_SIZE` で計算すれば解像度に依存しません。
+- **`area.txt` の読み込みは未実装です。** 保存だけ行います。実装する場合、ファイルは
+  `[178, 115]` のような Python リストの文字列表現が 1 行 1 点で並ぶ独自形式である点に注意してください。
+- **cupy と open3d は import が重く、GPU を要求します。** `processing/coloring.py` は cupy を
+  関数内で import しています。テストから触れる範囲に GPU 依存を持ち込まないでください。
+- **`sensor/kinect.py` の `_load_kinect_assembly` も遅延 import です。** Kinect SDK の無い環境でも
+  モジュール自体は import でき、`to_millimeters` を単体で検証できるようにするためです。
+
+## 変更してはいけない / 注意が必要なもの
+
+- `assets/` のテクスチャと `palette.py` の配色テーブル。教材としての見た目を決めています。
+- `data/test_frames/` の画像。再生モードの入力です。
+- `scripts/run.bat` の文字コード（Shift-JIS + CRLF）。UTF-8 にすると cmd が解釈できず起動に失敗します。
+
+## 環境に関する既知の問題
+
+- **`CUDA_PATH` はマシン既定で CUDA 11.8 を指しています。** `cupy-cuda12x` は 12.x を要求するため、
+  `run.bat` が起動時に v12.8 へ上書きしています。グローバルに変更すると CUDA 11.x を前提にした
+  他プロジェクト（`src/coloringtools_cuda` など）に影響するため、ランチャ内に閉じています。
+- **Kinect ドライバは HVCI（メモリ整合性）非対応です。** OS 側でメモリ整合性が有効になると
+  デバイスがコード 39 で停止し、アプリが起動しなくなります。
+  Windows Update やポリシー変更で再有効化された場合は真っ先にここを疑ってください。
+- miniforge が `C:\ProgramData\miniforge3`（読み取り専用）にあるため、env とパッケージキャッシュを
+  `%USERPROFILE%\.conda` へ向ける `.condarc` を設定済みです。env 作成時に `condabin\*.bat` への
+  書き込みエラーが出ますが無害です。
+- このワークツリーは別ユーザー所有のため、`git log` などが `detected dubious ownership` で失敗します。
+  `git -c safe.directory=D:/AR_Sandbox/src/AR_Sandbox_PCD <command>` で回避できます。
+  グローバル設定を変更する場合はユーザーに確認してください（勝手に実行しないこと）。
