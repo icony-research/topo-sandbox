@@ -283,6 +283,11 @@ class SandboxApp:
         self.settings.view_mode = VIEW_MODE_ORDER[(index + 1) % len(VIEW_MODE_ORDER)]
         self._show_message(f"表示モードの切り替え: {self.settings.view_mode.name}")
 
+        if self.settings.view_mode is ViewMode.DEM and self.settings.reference_plane is None:
+            # 水位は基準面からの絶対高さで決めるため、未取得のままでは出せない。
+            # 何も言わずに従来の DEM が出ると、故障と区別がつかない。
+            self._show_message("DEM: 水面を出すには基準面が要ります。k を押してください。")
+
     def _toggle_mapping_mode(self):
         if self.settings.mapping_mode is MappingMode.NORMAL:
             self.settings.mapping_mode = MappingMode.PERSPECTIVE

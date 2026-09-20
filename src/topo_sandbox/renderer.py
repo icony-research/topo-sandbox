@@ -19,7 +19,7 @@ class ViewMode(enum.Enum):
 
     COLORING = 0  #: 傾斜による彩色（本命）
     DEPTH = 1  #: 深度をそのまま白黒で
-    DEM = 2  #: 標高による色分け
+    DEM = 2  #: 標高による色分けと水面
     EDGE = 3  #: 傾斜の変化線
 
 
@@ -101,7 +101,7 @@ class Renderer:
         if mode is ViewMode.COLORING:
             return self._render_coloring(height_mm, display, settings)
         if mode is ViewMode.DEM:
-            return self._render_dem(display, settings)
+            return self._render_dem(height_mm, display, settings)
         if mode is ViewMode.DEPTH:
             return self._render_depth(display, settings)
         if mode is ViewMode.EDGE:
@@ -163,13 +163,20 @@ class Renderer:
             colored = overlays.draw_contours(depth_view, colored)
         return colored
 
-    def _render_dem(self, display, settings):
+    def _render_dem(self, height_mm, display, settings):
         depth_view = self._to_view(display)
 
         if self._use_perspective(settings):
             depth_view = self._warp(depth_view, settings)
 
-        dem = overlays.dem_color(depth_view)
+        if settings.reference_plane is None:
+            # 基準面が無いと高さの原点がフレームの中央値になり、砂を動かすたびに
+            # 水位が漂ってしまう。水面は出さず、従来どおりフレーム内で正規化する。
+            dem = overlays.dem_color(depth_view)
+        else:
+            dem = self._to_view(overlays.terrain_color(height_mm))
+            if self._use_perspective(settings):
+                dem = self._warp(dem, settings)
 
         if settings.show_contour:
             dem = overlays.draw_contours(depth_view, dem)

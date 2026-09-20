@@ -16,6 +16,9 @@ _MIN_ELEVATION_HUE = 240 / 360 * 255
 #: エッジとして抽出する色相の帯。平地と斜面の境目付近にあたる。
 _EDGE_HUE_RANGE = ((35, 10, 10), (40, 255, 255))
 
+#: Sobel フィルタ（ksize=3）の出力に掛かっている倍率。真の勾配へ戻すのに使う。
+_SOBEL_GAIN = 8.0
+
 
 def dem_color(depth_image):
     """標高に応じて色分けした画像を返す（DEM 表示）。
@@ -47,6 +50,111 @@ def dem_color(depth_image):
 
     image = image.astype(np.uint8)
     return cv2.cvtColor(image, cv2.COLOR_HSV2RGB_FULL)
+
+
+def _water_color(height_mm):
+    """水面下の画素を、深さに応じた青へ変換する。
+
+    浅いほど明るい水色、深いほど濃紺。陸のような段彩にせず連続で
+    変えているのは、段になっていると水面に見えないため。
+
+    Args:
+        height_mm: 基準面からの高さ[mm] (H, W)。
+
+    Returns:
+        RGB (H, W, 3) float32。水面より上の画素の値は使われない。
+    """
+    span = config.WATER_LEVEL_MM - config.WATER_DEEP_MM
+    ratio = np.clip((config.WATER_LEVEL_MM - height_mm) / span, 0.0, 1.0)
+
+    shallow = np.asarray(config.WATER_SHALLOW_COLOR, dtype=np.float32)
+    deep = np.asarray(config.WATER_DEEP_COLOR, dtype=np.float32)
+    return shallow + (deep - shallow) * ratio[..., None]
+
+
+def _land_color(height_mm):
+    """陸地を標高帯で塗り分ける。
+
+    Args:
+        height_mm: 基準面からの高さ[mm] (H, W)。
+
+    Returns:
+        RGB (H, W, 3) float32。
+    """
+    bounds = np.asarray([band[0] for band in config.LAND_BANDS], dtype=np.float32)
+    colors = np.asarray([band[1] for band in config.LAND_BANDS], dtype=np.float32)
+
+    # 先頭の帯の下限より低い画素も添字 0 に落ちるが、そこは水面下なので
+    # あとで水の色に置き換わる。
+    index = np.digitize(height_mm, bounds[1:])
+    return colors[index]
+
+
+def hillshade(height_mm):
+    """陰影起伏の明るさ係数を作る。
+
+    地形図の陰影起伏と同じ計算（斜面の向きと光源のなす角）で、盛った砂の
+    片側に影を落とす。色分けだけでは平面に見えてしまう起伏が、影がつくと
+    山として読めるようになる。
+
+    Args:
+        height_mm: 基準面からの高さ[mm] (H, W) float32。
+
+    Returns:
+        明るさの倍率 (H, W) float32。1 を中心に、影の側が暗くなる。
+    """
+    height = np.asarray(height_mm, dtype=np.float32)
+
+    # Sobel の出力は勾配の 8 倍になっているため戻す。
+    scale = config.HILLSHADE_Z_FACTOR / _SOBEL_GAIN
+    dz_dx = cv2.Sobel(height, cv2.CV_32F, 1, 0, ksize=3, scale=scale)
+    dz_dy = cv2.Sobel(height, cv2.CV_32F, 0, 1, ksize=3, scale=scale)
+
+    slope = np.arctan(np.hypot(dz_dx, dz_dy))
+
+    # 勾配は配列の (列, 行) 方向で出るが、Renderer._to_view が左右反転してから
+    # 投影するため、投影像での東 = 配列の -列方向、北 = 配列の -行方向になる。
+    # 斜面の下り方向を投影像の座標で測ると両軸の符号が二重に反転して
+    # (dz_dx, dz_dy) そのものに戻る。教科書どおりの式に見えないのはこのため。
+    # 向きを取り違えて光が下から当たると、人は山と谷を反転して知覚する。
+    aspect = np.arctan2(dz_dy, dz_dx)
+
+    zenith = np.deg2rad(90.0 - config.HILLSHADE_ALTITUDE_DEG)
+    azimuth = np.deg2rad(360.0 - config.HILLSHADE_AZIMUTH_DEG + 90.0)
+
+    shade = np.cos(zenith) * np.cos(slope) + np.sin(zenith) * np.sin(slope) * np.cos(
+        azimuth - aspect
+    )
+    shade = np.clip(shade, 0.0, 1.0)
+
+    # 平坦地がそのままの明るさになるよう、平坦時の値で割って正規化する。
+    # 正規化しないと全体が cos(天頂角) 倍に暗くなる。
+    strength = config.HILLSHADE_STRENGTH
+    return (1.0 - strength) + strength * shade / np.cos(zenith)
+
+
+def terrain_color(height_mm):
+    """基準面からの絶対高さで、水面と標高帯に塗り分ける（DEM 表示）。
+
+    :func:`dem_color` と違い、フレームごとの正規化をしない。水位を
+    絶対値で決めるため、砂を動かしても水際が動かない。基準面が
+    取れているときだけ使えることに注意（高さの原点が要る）。
+
+    Args:
+        height_mm: 基準面からの高さ[mm] (H, W)。
+
+    Returns:
+        RGB 画像 (H, W, 3) uint8。
+    """
+    height = np.asarray(height_mm, dtype=np.float32)
+
+    # 陰影は陸だけに掛ける。水面に影が出ると水に見えない。
+    color = _land_color(height) * hillshade(height)[..., None]
+
+    under_water = height < config.WATER_LEVEL_MM
+    color = np.where(under_water[..., None], _water_color(height), color)
+
+    return np.clip(color, 0, 255).astype(np.uint8)
 
 
 def edge_lines(coloring_image):
