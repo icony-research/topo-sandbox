@@ -559,8 +559,6 @@ FodyWeavers.xsd
 # JetBrains Rider
 *.sln.iml
 # --- AR Sandbox ---
-# 投影エリアの座標は現場ごとに変わるため、リポジトリには含めない
-# （初期値として 1 つだけ追跡している）
 /outputs/
 *.pcd
 .ruff_cache/

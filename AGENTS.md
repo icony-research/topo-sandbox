@@ -27,7 +27,6 @@ src/topo_sandbox/
   renderer.py      表示モードごとの描画パイプライン。GUI から独立している
   config.py        解像度と調整値。マジックナンバーはここに集約する
   palette.py       配色テーブル（361 色）。生成物に近いデータなので整形対象外
-  area.py          投影エリアの保存
   sensor/          base.py の DepthSource を kinect.py と replay.py が実装
   processing/      depth（欠測の穴埋めと表示階調）/ plane（基準面と傾き補正）/
                    pointcloud / coloring（GPU）/ overlays（CPU のみ）
@@ -102,8 +101,6 @@ scripts\run.bat             実機で最終確認
   の u, v は画像を 0〜1 に正規化した座標なので、あてはめた解像度と適用する解像度が
   違っても使えます。傾きを度で出すときだけ焦点距離が要りますが、画素数と焦点距離は
   どちらも解像度に比例するため `config.SENSOR_SIZE` で計算すれば解像度に依存しません。
-- **`area.txt` の読み込みは未実装です。** 保存だけ行います。実装する場合、ファイルは
-  `[178, 115]` のような Python リストの文字列表現が 1 行 1 点で並ぶ独自形式である点に注意してください。
 - **cupy と open3d は import が重く、GPU を要求します。** `processing/coloring.py` は cupy を
   関数内で import しています。テストから触れる範囲に GPU 依存を持ち込まないでください。
 - **`sensor/kinect.py` の `_load_kinect_assembly` も遅延 import です。** Kinect SDK の無い環境でも

@@ -15,9 +15,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 #: Kinect 無しで動かすときに読み込むフレーム
 TEST_FRAMES_DIR = DATA_DIR / "test_frames"
 
-#: 投影エリアの四隅を保存するファイル
-AREA_FILE = PROJECT_ROOT / "area.txt"
-
 #: Kinect の深度フレーム（640x480 固定）
 SENSOR_SIZE = (640, 480)
 

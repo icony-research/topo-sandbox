@@ -12,7 +12,6 @@ from queue import Queue
 from PIL import Image, ImageTk
 
 from . import config
-from .area import save_area
 from .processing import plane
 from .renderer import VIEW_MODE_ORDER, MappingMode, Renderer, RenderSettings, ViewMode
 
@@ -250,8 +249,6 @@ class SandboxApp:
             self._show_message("等高線: %s" % ("表示" if self.settings.show_contour else "非表示"))
         elif key == "j":
             self._toggle_mapping_mode()
-        elif key == "w":
-            self._save_area()
         elif key == "k":
             self._start_plane_capture()
         elif key == "K":
@@ -303,13 +300,6 @@ class SandboxApp:
         value = max(0.0, min(config.COLOR_SENSITIVITY_MAX, value))
         self.settings.color_sensitivity = value
         self._show_message(f"カラー感度: {value:.1f}")
-
-    def _save_area(self):
-        if not self.settings.area_positions:
-            self._show_message("保存するエリア座標がありません。")
-            return
-        save_area(self.settings.area_positions)
-        self._show_message(f"座標リストを {config.AREA_FILE.name} へ保存しました。")
 
     # ------------------------------------------------------------------
     # 基準面の取得
