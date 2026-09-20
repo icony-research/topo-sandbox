@@ -1,6 +1,6 @@
 """彩色以外の表示モードと、重ね描きする要素。
 
-DEM（標高による色分け）、テクスチャの貼り分け、エッジ抽出、等高線。
+DEM（標高による色分け）、エッジ抽出、等高線。
 いずれも numpy と OpenCV だけで完結するため、GPU の無い環境でも検証できる。
 """
 
@@ -12,12 +12,6 @@ from .. import config
 #: 最低標高に割り当てる色相。OpenCV の HSV は色相を 0-255 で表すため、
 #: 240 度（青）を 255 段階に換算している。
 _MIN_ELEVATION_HUE = 240 / 360 * 255
-
-#: テクスチャ貼り分けのしきい値（HSV の色相）。
-#: 彩色画像は平坦＝赤(0 付近)、急斜面＝青紫(高い値) なので、
-#: 色相の低い側を「平地＝市街地」、高い側を「斜面＝森林」とみなす。
-_FLAT_HUE_RANGE = ((0, 10, 10), (50, 255, 255))
-_SLOPE_HUE_RANGE = ((50, 10, 10), (255, 255, 255))
 
 #: エッジとして抽出する色相の帯。平地と斜面の境目付近にあたる。
 _EDGE_HUE_RANGE = ((35, 10, 10), (40, 255, 255))
@@ -53,29 +47,6 @@ def dem_color(depth_image):
 
     image = image.astype(np.uint8)
     return cv2.cvtColor(image, cv2.COLOR_HSV2RGB_FULL)
-
-
-def blend_textures(coloring_image, machi_texture, mori_texture):
-    """彩色画像の色相から平地と斜面を判定し、テクスチャを貼り分ける。
-
-    Args:
-        coloring_image: :func:`colorize_by_slope` の出力と同じ RGB 画像。
-        machi_texture: 平地に貼る市街地テクスチャ（BGR、同じ大きさ）。
-        mori_texture: 斜面に貼る森林テクスチャ（BGR、同じ大きさ）。
-
-    Returns:
-        RGB 画像 (H, W, 3) uint8。
-    """
-    hsv = cv2.cvtColor(coloring_image, cv2.COLOR_RGB2HSV_FULL)
-
-    flat_mask = cv2.inRange(hsv, *_FLAT_HUE_RANGE)
-    slope_mask = cv2.inRange(hsv, *_SLOPE_HUE_RANGE)
-
-    flat_mask = cv2.cvtColor(flat_mask, cv2.COLOR_GRAY2RGB)
-    slope_mask = cv2.cvtColor(slope_mask, cv2.COLOR_GRAY2RGB)
-
-    merged = cv2.bitwise_and(machi_texture, flat_mask) + cv2.bitwise_and(mori_texture, slope_mask)
-    return cv2.cvtColor(merged, cv2.COLOR_BGR2RGB)
 
 
 def edge_lines(coloring_image):

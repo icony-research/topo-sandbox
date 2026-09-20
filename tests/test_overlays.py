@@ -1,4 +1,4 @@
-"""DEM・テクスチャ・エッジ・等高線の検証。
+"""DEM・エッジ・等高線の検証。
 
 いずれも numpy と OpenCV だけで完結するため、Kinect も GPU も要らない。
 """
@@ -48,22 +48,6 @@ class TestEdgeLines:
         result = overlays.edge_lines(coloring)
         # 真っ黒（彩度・明度 0）はエッジ帯の条件を満たさない
         assert result.max() == 0
-
-
-class TestBlendTextures:
-    def test_平地と斜面でテクスチャが貼り分けられる(self):
-        height, width = 20, 20
-        coloring = np.zeros((height, width, 3), dtype=np.uint8)
-        coloring[:10] = [255, 0, 0]  # 赤 = 平坦
-        coloring[10:] = [0, 0, 255]  # 青 = 斜面
-
-        machi = np.full((height, width, 3), 60, dtype=np.uint8)
-        mori = np.full((height, width, 3), 200, dtype=np.uint8)
-
-        result = overlays.blend_textures(coloring, machi, mori)
-
-        assert result[0, 0].max() == 60
-        assert result[-1, 0].max() == 200
 
 
 class TestDrawContours:

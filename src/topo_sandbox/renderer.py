@@ -20,8 +20,7 @@ class ViewMode(enum.Enum):
     COLORING = 0  #: 傾斜による彩色（本命）
     DEPTH = 1  #: 深度をそのまま白黒で
     DEM = 2  #: 標高による色分け
-    TEXTURE = 3  #: 市街地／森林のテクスチャ貼り分け
-    EDGE = 4  #: 傾斜の変化線
+    EDGE = 3  #: 傾斜の変化線
 
 
 #: `v` キーで巡回する順序
@@ -29,7 +28,6 @@ VIEW_MODE_ORDER = [
     ViewMode.COLORING,
     ViewMode.DEPTH,
     ViewMode.DEM,
-    ViewMode.TEXTURE,
     ViewMode.EDGE,
 ]
 
@@ -78,17 +76,6 @@ class RenderSettings:
 class Renderer:
     """深度フレームから投影用の画像を作る。"""
 
-    def __init__(self):
-        self._machi_texture = self._load_texture(config.MACHI_TEXTURE_PATH)
-        self._mori_texture = self._load_texture(config.MORI_TEXTURE_PATH)
-
-    @staticmethod
-    def _load_texture(path):
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise RuntimeError(f"テクスチャを読み込めません: {path}")
-        return image
-
     # ------------------------------------------------------------------
     def render(self, depth_frame, settings):
         """深度フレーム 1 枚を表示用の画像へ変換する。
@@ -117,8 +104,6 @@ class Renderer:
             return self._render_dem(display, settings)
         if mode is ViewMode.DEPTH:
             return self._render_depth(display, settings)
-        if mode is ViewMode.TEXTURE:
-            return self._render_texture(height_mm, settings)
         if mode is ViewMode.EDGE:
             return self._render_edge(height_mm, settings)
         raise ValueError(f"未知の表示モード: {mode!r}")
@@ -200,14 +185,6 @@ class Renderer:
         if settings.show_contour:
             depth_view = overlays.draw_contours(depth_view, depth_view)
         return depth_view
-
-    def _render_texture(self, height_mm, settings):
-        colored = self._colorize(height_mm, settings)
-
-        if self._use_perspective(settings):
-            colored = self._warp(colored, settings)
-
-        return overlays.blend_textures(colored, self._machi_texture, self._mori_texture)
 
     def _render_edge(self, height_mm, settings):
         colored = self._colorize(height_mm, settings)

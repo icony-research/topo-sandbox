@@ -10,12 +10,7 @@ from pathlib import Path
 #: リポジトリのルート（src/topo_sandbox/config.py から 2 つ上）
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-ASSETS_DIR = PROJECT_ROOT / "assets"
 DATA_DIR = PROJECT_ROOT / "data"
-
-#: テクスチャ表示で使う画像。VIEW_SIZE と同じ大きさである必要がある。
-MACHI_TEXTURE_PATH = ASSETS_DIR / "machi_texture.png"
-MORI_TEXTURE_PATH = ASSETS_DIR / "mori_texture.png"
 
 #: Kinect 無しで動かすときに読み込むフレーム
 TEST_FRAMES_DIR = DATA_DIR / "test_frames"
