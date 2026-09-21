@@ -160,3 +160,40 @@ class TestTerrainColor:
     @pytest.mark.parametrize("value", [-1000.0, 0.0, 1000.0])
     def test_極端な高さでも落ちない(self, value):
         overlays.terrain_color(np.full((20, 20), value, dtype=np.float32))
+
+
+class TestWaterWaves:
+    def _water(self, depth_below_mm=20.0):
+        return np.full((40, 40), config.WATER_LEVEL_MM - depth_below_mm, dtype=np.float32)
+
+    def test_時間が進むと水面の明るさが変わる(self):
+        """止まった青一色だと、掘った穴が水たまりに見えない。"""
+        still = overlays.terrain_color(self._water(), elapsed_s=0.0)
+        later = overlays.terrain_color(self._water(), elapsed_s=0.9)
+        assert (still != later).any()
+
+    def test_陸は時間で変わらない(self):
+        """さざ波が陸へ漏れると、砂場全体がちらついて見える。"""
+        land = np.full((40, 40), 50.0, dtype=np.float32)
+        np.testing.assert_array_equal(
+            overlays.terrain_color(land, elapsed_s=0.0),
+            overlays.terrain_color(land, elapsed_s=0.9),
+        )
+
+    def test_振幅を0にすると波が止まる(self, monkeypatch):
+        """実演中に目障りだったとき、config だけで止められること。"""
+        monkeypatch.setattr(config, "WATER_WAVE_AMPLITUDE", 0.0)
+        np.testing.assert_array_equal(
+            overlays.terrain_color(self._water(), elapsed_s=0.0),
+            overlays.terrain_color(self._water(), elapsed_s=0.9),
+        )
+
+    @pytest.mark.parametrize("elapsed_s", [0.0, 0.5, 1.0, 1.7, 2.6, 3.9])
+    def test_波は水深の濃淡を消さない(self, elapsed_s):
+        """振幅が大きすぎると、浅瀬と深場の区別がつかなくなる。"""
+        shallow = self._water(5.0)
+        deep = np.full((40, 40), config.WATER_DEEP_MM - 50.0, dtype=np.float32)
+
+        assert int(overlays.terrain_color(deep, elapsed_s).sum()) < int(
+            overlays.terrain_color(shallow, elapsed_s).sum()
+        )

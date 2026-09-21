@@ -52,14 +52,42 @@ def dem_color(depth_image):
     return cv2.cvtColor(image, cv2.COLOR_HSV2RGB_FULL)
 
 
-def _water_color(height_mm):
+def _wave_field(shape, elapsed_s):
+    """水面のさざ波の明暗を作る。
+
+    波長と向きの違う波を重ねる。1 本だけだと縞模様にしか見えない。
+
+    Args:
+        shape: (H, W)。処理解像度の大きさ。
+        elapsed_s: 表示を始めてからの経過秒。
+
+    Returns:
+        おおむね -1〜1 に収まるさざ波 (H, W) float32。
+    """
+    rows, columns = np.mgrid[0 : shape[0], 0 : shape[1]]
+    field = np.zeros(shape, dtype=np.float32)
+
+    for length_px, direction_deg, period_s in config.WATER_WAVES:
+        direction = np.deg2rad(direction_deg)
+        wave_number = 2.0 * np.pi / length_px
+        along = columns * np.cos(direction) + rows * np.sin(direction)
+        field += np.sin(wave_number * along - 2.0 * np.pi * elapsed_s / period_s)
+
+    return (field / len(config.WATER_WAVES)).astype(np.float32)
+
+
+def _water_color(height_mm, elapsed_s):
     """水面下の画素を、深さに応じた青へ変換する。
 
     浅いほど明るい水色、深いほど濃紺。陸のような段彩にせず連続で
     変えているのは、段になっていると水面に見えないため。
 
+    さらにさざ波で明るさを振る。止まった青一色だと、掘った穴が
+    水たまりではなく「青く塗られた窪み」に見えてしまう。
+
     Args:
         height_mm: 基準面からの高さ[mm] (H, W)。
+        elapsed_s: 表示を始めてからの経過秒。さざ波を進めるのに使う。
 
     Returns:
         RGB (H, W, 3) float32。水面より上の画素の値は使われない。
@@ -69,7 +97,10 @@ def _water_color(height_mm):
 
     shallow = np.asarray(config.WATER_SHALLOW_COLOR, dtype=np.float32)
     deep = np.asarray(config.WATER_DEEP_COLOR, dtype=np.float32)
-    return shallow + (deep - shallow) * ratio[..., None]
+    color = shallow + (deep - shallow) * ratio[..., None]
+
+    ripple = 1.0 + config.WATER_WAVE_AMPLITUDE * _wave_field(height_mm.shape, elapsed_s)
+    return color * ripple[..., None]
 
 
 def _land_color(height_mm):
@@ -133,7 +164,7 @@ def hillshade(height_mm):
     return (1.0 - strength) + strength * shade / np.cos(zenith)
 
 
-def terrain_color(height_mm):
+def terrain_color(height_mm, elapsed_s=0.0):
     """基準面からの絶対高さで、水面と標高帯に塗り分ける（DEM 表示）。
 
     :func:`dem_color` と違い、フレームごとの正規化をしない。水位を
@@ -142,6 +173,8 @@ def terrain_color(height_mm):
 
     Args:
         height_mm: 基準面からの高さ[mm] (H, W)。
+        elapsed_s: 表示を始めてからの経過秒。水面のさざ波を進めるのに使う。
+            省略すると波の止まった状態になる。
 
     Returns:
         RGB 画像 (H, W, 3) uint8。
@@ -152,7 +185,7 @@ def terrain_color(height_mm):
     color = _land_color(height) * hillshade(height)[..., None]
 
     under_water = height < config.WATER_LEVEL_MM
-    color = np.where(under_water[..., None], _water_color(height), color)
+    color = np.where(under_water[..., None], _water_color(height, elapsed_s), color)
 
     return np.clip(color, 0, 255).astype(np.uint8)
 

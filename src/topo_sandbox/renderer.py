@@ -5,6 +5,7 @@ GUI からは切り離してあるため、Tk を起動せずに検証できる�
 """
 
 import enum
+import time
 from dataclasses import dataclass, field
 
 import cv2
@@ -75,6 +76,22 @@ class RenderSettings:
 
 class Renderer:
     """深度フレームから投影用の画像を作る。"""
+
+    def __init__(self, clock=time.monotonic):
+        """
+        Args:
+            clock: 秒を返す関数。水面のさざ波を進めるのに使う。
+
+        さざ波をフレーム数ではなく時計で進めるのは、負荷で処理が間に合わない
+        フレームを `app._tick` が捨てるため。フレーム数で数えると、混雑した
+        ときだけ波がゆっくりになる。試験では固定値を返す関数を渡す。
+        """
+        self._clock = clock
+        self._started_at = clock()
+
+    def _elapsed(self):
+        """表示を始めてからの経過秒。"""
+        return self._clock() - self._started_at
 
     # ------------------------------------------------------------------
     def render(self, depth_frame, settings):
@@ -174,7 +191,7 @@ class Renderer:
             # 水位が漂ってしまう。水面は出さず、従来どおりフレーム内で正規化する。
             dem = overlays.dem_color(depth_view)
         else:
-            dem = self._to_view(overlays.terrain_color(height_mm))
+            dem = self._to_view(overlays.terrain_color(height_mm, self._elapsed()))
             if self._use_perspective(settings):
                 dem = self._warp(dem, settings)
 
