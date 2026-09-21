@@ -265,6 +265,8 @@ class SandboxApp:
             self._adjust_sensitivity(+config.COLOR_SENSITIVITY_DELTA)
         elif key == "s":
             self._adjust_sensitivity(-config.COLOR_SENSITIVITY_DELTA)
+        elif key == "r":
+            self._toggle_rivers()
         elif key == "n":
             self._adjust_water_level(+config.WATER_LEVEL_DELTA_MM)
         elif key == "m":
@@ -311,6 +313,13 @@ class SandboxApp:
         value = max(0.0, min(config.COLOR_SENSITIVITY_MAX, value))
         self.settings.color_sensitivity = value
         self._show_message(f"カラー感度: {value:.1f}")
+
+    def _toggle_rivers(self):
+        self.settings.show_rivers = not self.settings.show_rivers
+        message = "川: %s" % ("表示" if self.settings.show_rivers else "非表示")
+        if self.settings.view_mode is not ViewMode.DEM:
+            message += "（DEM 表示で見えます。v で切り替え）"
+        self._show_message(message)
 
     def _adjust_water_level(self, delta):
         value = self.settings.water_level_mm + delta

@@ -1,7 +1,7 @@
 """キー操作のうち、Tk を起動せずに確かめられる範囲の検証。
 
 `SandboxApp.__init__` は値を持つだけでウィジェットを作らないため、
-水位の操作だけは画面なしで確かめられる。描画そのものは実機での確認が必要。
+水位や表示の切り替えは画面なしで確かめられる。描画そのものは実機での確認が必要。
 """
 
 from topo_sandbox import config
@@ -52,4 +52,26 @@ class TestWaterLevelKeys:
 
         app.settings.view_mode = ViewMode.DEM
         app._adjust_water_level(+config.WATER_LEVEL_DELTA_MM)
+        assert "DEM" not in app._message
+
+
+class TestRiverKey:
+    def test_切り替えられる(self):
+        app = _app()
+        assert app.settings.show_rivers is False
+
+        app._toggle_rivers()
+        assert app.settings.show_rivers is True
+
+        app._toggle_rivers()
+        assert app.settings.show_rivers is False
+
+    def test_DEM以外では見えないと案内する(self):
+        app = _app()
+        app.settings.view_mode = ViewMode.COLORING
+        app._toggle_rivers()
+        assert "DEM" in app._message
+
+        app.settings.view_mode = ViewMode.DEM
+        app._toggle_rivers()
         assert "DEM" not in app._message

@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from . import config
-from .processing import coloring, depth, overlays, pointcloud
+from .processing import coloring, depth, overlays, pointcloud, rivers
 
 
 class ViewMode(enum.Enum):
@@ -59,6 +59,8 @@ class RenderSettings:
     z_scale: float = config.Z_SCALE_INITIAL
     color_sensitivity: float = config.COLOR_SENSITIVITY_INITIAL
     show_contour: bool = False
+    #: 川（流量）を重ねるか。r キーで切り替える。
+    show_rivers: bool = False
     #: 水面の高さ[mm]。n / m キーで上下し、Shift + N で初期値へ戻す。
     water_level_mm: float = config.WATER_LEVEL_MM
     #: センサ側の砂場の四隅。左上から反時計回りに 4 点。
@@ -160,6 +162,13 @@ class Renderer:
             return image
         return cv2.warpPerspective(image, matrix, config.VIEW_SIZE)
 
+    def _to_projection(self, image, settings):
+        """投影解像度へ拡大し、必要なら射影変換まで済ませる。"""
+        image = self._to_view(image)
+        if self._use_perspective(settings):
+            image = self._warp(image, settings)
+        return image
+
     def _use_perspective(self, settings):
         """射影変換を行うか。四隅が未指定なら行わない。
 
@@ -195,12 +204,26 @@ class Renderer:
             # 基準面が無いと高さの原点がフレームの中央値になり、砂を動かすたびに
             # 水位が漂ってしまう。水面は出さず、従来どおりフレーム内で正規化する。
             dem = overlays.dem_color(depth_view)
+
+            # 流量は絶対的な高さを要らない（下る向きだけで決まる）ので、
+            # 基準面が無くても川は出せる。こちらは投影解像度で混ぜるしかない。
+            if settings.show_rivers:
+                strength = self._to_projection(rivers.river_strength(height_mm), settings)
+                dem = overlays.draw_rivers(dem, strength)
         else:
-            dem = self._to_view(
-                overlays.terrain_color(height_mm, self._elapsed(), settings.water_level_mm)
-            )
-            if self._use_perspective(settings):
-                dem = self._warp(dem, settings)
+            terrain = overlays.terrain_color(height_mm, self._elapsed(), settings.water_level_mm)
+
+            dry = height_mm >= settings.water_level_mm
+            if settings.show_rivers and dry.any():
+                # 水面より下の川は描かない。湖や海に入った川は見えなくなる。
+                # 全部沈んでいるなら流量の計算そのものが要らない。
+                strength = np.where(dry, rivers.river_strength(height_mm), 0.0)
+
+                # 川は拡大する前に混ぜる。投影解像度で混ぜると触る画素が
+                # 6 倍になり、それだけで 1 フレームの予算の半分を使う。
+                terrain = overlays.draw_rivers(terrain, strength)
+
+            dem = self._to_projection(terrain, settings)
 
         if settings.show_contour:
             dem = overlays.draw_contours(depth_view, dem)

@@ -370,6 +370,37 @@ def edge_lines(coloring_image):
     return cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
 
 
+def draw_rivers(canvas, strength):
+    """川を描き込む。
+
+    等高線のような線ではなく、川らしさで色を混ぜる。上流ほど薄く、
+    水が集まるほど濃くなるので、支流から本流へ太くなっていく様子が出る。
+
+    :func:`draw_contours` と同じく canvas を直接書き換える。
+
+    Args:
+        canvas: 描き込み先の RGB 画像 (H, W, 3) uint8。
+        strength: 川らしさ 0〜1 (H, W) float32。
+
+    Returns:
+        川を重ねた RGB 画像 (H, W, 3) uint8。
+    """
+    alpha = np.clip(strength, 0.0, 1.0)
+    wet = alpha > 0.0
+
+    # 砂場のほとんどは川ではない。全画素ぶん混ぜると投影解像度では
+    # 17ms かかり、それだけで 1 フレームの予算の半分を使ってしまう。
+    if not wet.any():
+        return canvas
+
+    river = np.asarray(config.RIVER_COLOR, dtype=np.float32)
+    weight = alpha[wet][:, None]
+
+    blended = canvas[wet] * (1.0 - weight) + river * weight
+    canvas[wet] = np.clip(blended, 0, 255).astype(np.uint8)
+    return canvas
+
+
 def draw_contours(depth_image, canvas):
     """等高線を描き込む。
 

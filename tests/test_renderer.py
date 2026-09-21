@@ -126,7 +126,7 @@ def _frame_with_pool():
     return (_BASE_MM + hollow).astype(np.float32)
 
 
-def _dem_settings():
+def _dem_settings(**overrides):
     plane = ReferencePlane(
         a=0.0,
         b=0.0,
@@ -136,7 +136,7 @@ def _dem_settings():
         distance_mm=_BASE_MM,
         coverage=99.0,
     )
-    return _settings(view_mode=ViewMode.DEM, reference_plane=plane)
+    return _settings(view_mode=ViewMode.DEM, reference_plane=plane, **overrides)
 
 
 class TestWaterAnimationClock:
@@ -178,3 +178,37 @@ class TestWaterAnimationClock:
         clock.advance(1.1)
 
         np.testing.assert_array_equal(first, renderer.render(frame, settings))
+
+
+class TestRivers:
+    def test_切り替えで見た目が変わる(self):
+        renderer = Renderer(clock=lambda: 0.0)
+        frame = _frame_with_pool()
+
+        without = renderer.render(frame, _dem_settings())
+        with_rivers = renderer.render(frame, _dem_settings(show_rivers=True))
+
+        assert (without != with_rivers).any()
+
+    def test_水面より下には描かない(self):
+        """湖や海に入った川は見えなくなる。"""
+        renderer = Renderer(clock=lambda: 0.0)
+        frame = _frame_with_pool()
+
+        # 水位を上げ切ると砂場が全部沈むので、川は 1 本も出ない
+        drowned = _dem_settings(show_rivers=True, water_level_mm=config.WATER_LEVEL_MAX_MM)
+        flooded = _dem_settings(water_level_mm=config.WATER_LEVEL_MAX_MM)
+
+        np.testing.assert_array_equal(
+            renderer.render(frame, drowned), renderer.render(frame, flooded)
+        )
+
+    def test_基準面が無くても描ける(self):
+        """流れの向きは高さの原点に依らないので、k を押す前でも出せる。"""
+        renderer = Renderer(clock=lambda: 0.0)
+        frame = _frame_with_pool()
+
+        without = renderer.render(frame, _settings(view_mode=ViewMode.DEM))
+        with_rivers = renderer.render(frame, _settings(view_mode=ViewMode.DEM, show_rivers=True))
+
+        assert (without != with_rivers).any()
