@@ -197,3 +197,56 @@ class TestWaterWaves:
         assert int(overlays.terrain_color(deep, elapsed_s).sum()) < int(
             overlays.terrain_color(shallow, elapsed_s).sum()
         )
+
+
+class TestWaterLighting:
+    def _water(self, depth_below_mm=30.0, size=60):
+        return np.full((size, size), config.WATER_LEVEL_MM - depth_below_mm, dtype=np.float32)
+
+    def test_一様な深さでもきらめきが出る(self):
+        """深さが同じなら色も同じ、では水に見えない。
+
+        水らしさは、細かい波が光源を映してきらめくところから来る。
+        """
+        brightness = overlays.terrain_color(self._water(), 0.0).astype(np.int32).sum(axis=2)
+        assert brightness.max() - brightness.min() > 150
+
+    def test_きらめきは陸へ漏れない(self):
+        """水面の照り返しが陸に出ると、砂場全体がぎらついて読めなくなる。"""
+        land = np.full((60, 60), 50.0, dtype=np.float32)
+        brightness = overlays.terrain_color(land, 0.0).astype(np.int32).sum(axis=2)
+        assert brightness.max() - brightness.min() == 0
+
+    def test_水際に白波が出る(self, monkeypatch):
+        shore = self._water(2.0)
+        with_surf = overlays.terrain_color(shore, 0.0).astype(np.int32).sum()
+
+        monkeypatch.setattr(config, "WATER_SURF_STRENGTH", 0.0)
+        without_surf = overlays.terrain_color(shore, 0.0).astype(np.int32).sum()
+
+        assert with_surf > without_surf
+
+    def test_白波は深場には出ない(self, monkeypatch):
+        deep = self._water(200.0)
+        with_surf = overlays.terrain_color(deep, 0.0).astype(np.int32).sum()
+
+        monkeypatch.setattr(config, "WATER_SURF_STRENGTH", 0.0)
+        without_surf = overlays.terrain_color(deep, 0.0).astype(np.int32).sum()
+
+        assert with_surf == without_surf
+
+    def test_波が1本も無くても落ちない(self, monkeypatch):
+        """設定を空にしたときにゼロ除算で止まらないこと。"""
+        monkeypatch.setattr(config, "WATER_WAVES", [])
+        result = overlays.terrain_color(self._water(), 1.0)
+        assert np.isfinite(result.astype(np.float32)).all()
+
+    def test_水が1画素も無くても落ちない(self):
+        """設営直後はまだ誰も掘っていない。水の計算へ入らない経路。"""
+        land = np.full((60, 60), 10.0, dtype=np.float32)
+        result = overlays.terrain_color(land, 1.0)
+        assert result.shape == (60, 60, 3)
+
+    def test_全面が水でも落ちない(self):
+        result = overlays.terrain_color(self._water(150.0), 1.0)
+        assert result.shape == (60, 60, 3)

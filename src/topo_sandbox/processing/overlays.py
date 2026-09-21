@@ -52,55 +52,136 @@ def dem_color(depth_image):
     return cv2.cvtColor(image, cv2.COLOR_HSV2RGB_FULL)
 
 
-def _wave_field(shape, elapsed_s):
-    """水面のさざ波の明暗を作る。
+def _wave_surface(rows, columns, elapsed_s):
+    """水面の起伏と傾きを作る。
 
     波長と向きの違う波を重ねる。1 本だけだと縞模様にしか見えない。
+    高さそのものは白波の明滅にしか使わないので、光の当たり方を決める
+    傾きのほうを主に計算している。
 
     Args:
-        shape: (H, W)。処理解像度の大きさ。
+        rows: 対象画素の行番号 (N,)。
+        columns: 対象画素の列番号 (N,)。
         elapsed_s: 表示を始めてからの経過秒。
 
     Returns:
-        おおむね -1〜1 に収まるさざ波 (H, W) float32。
+        (elevation, slope_col, slope_row)。いずれも (N,)。elevation は
+        -1〜1 の波の高さ、slope_* は水面の傾き（列方向・行方向）。
     """
-    rows, columns = np.mgrid[0 : shape[0], 0 : shape[1]]
-    field = np.zeros(shape, dtype=np.float32)
+    elevation = np.zeros(rows.shape, dtype=np.float32)
+    slope_col = np.zeros(rows.shape, dtype=np.float32)
+    slope_row = np.zeros(rows.shape, dtype=np.float32)
 
-    for length_px, direction_deg, period_s in config.WATER_WAVES:
+    for length_px, direction_deg, period_s, steepness in config.WATER_WAVES:
         direction = np.deg2rad(direction_deg)
+        along_col = np.cos(direction)
+        along_row = np.sin(direction)
+
         wave_number = 2.0 * np.pi / length_px
-        along = columns * np.cos(direction) + rows * np.sin(direction)
-        field += np.sin(wave_number * along - 2.0 * np.pi * elapsed_s / period_s)
+        phase = wave_number * (columns * along_col + rows * along_row)
+        phase -= 2.0 * np.pi * elapsed_s / period_s
 
-    return (field / len(config.WATER_WAVES)).astype(np.float32)
+        elevation += np.sin(phase)
+
+        # 傾きは進む向きへ射影する。sin の微分なので cos になる。
+        tilt = np.cos(phase) * steepness * config.WATER_WAVE_AMPLITUDE
+        slope_col += tilt * along_col
+        slope_row += tilt * along_row
+
+    # 振幅はここでまとめて掛ける。傾きだけに掛けて高さに掛け忘れると、
+    # 振幅 0 にしても白波だけが動き続ける。
+    elevation *= config.WATER_WAVE_AMPLITUDE / max(len(config.WATER_WAVES), 1)
+    return elevation, slope_col, slope_row
 
 
-def _water_color(height_mm, elapsed_s):
-    """水面下の画素を、深さに応じた青へ変換する。
+def _water_shading(slope_col, slope_row):
+    """水面の傾きから、拡散光と光源の映り込みを求める。
 
-    浅いほど明るい水色、深いほど濃紺。陸のような段彩にせず連続で
-    変えているのは、段になっていると水面に見えないため。
+    光源は陸の陰影起伏と同じ向きにしてある。別々の向きにすると、同じ砂場なのに
+    山の影と水の照り返しが食い違い、かえって嘘くさく見える。
 
-    さらにさざ波で明るさを振る。止まった青一色だと、掘った穴が
-    水たまりではなく「青く塗られた窪み」に見えてしまう。
+    法線を (slope_col, slope_row, 1) と置けるのは :func:`hillshade` と同じ理由で、
+    ``_to_view`` の左右反転と画像の y の向きが打ち消し合うため。
 
     Args:
-        height_mm: 基準面からの高さ[mm] (H, W)。
-        elapsed_s: 表示を始めてからの経過秒。さざ波を進めるのに使う。
+        slope_col: 水面の傾き（列方向）。
+        slope_row: 水面の傾き（行方向）。
 
     Returns:
-        RGB (H, W, 3) float32。水面より上の画素の値は使われない。
+        (diffuse, specular)。どちらも 0〜1。
     """
+    length = np.sqrt(slope_col**2 + slope_row**2 + 1.0)
+
+    azimuth = np.deg2rad(360.0 - config.HILLSHADE_AZIMUTH_DEG + 90.0)
+    altitude = np.deg2rad(config.HILLSHADE_ALTITUDE_DEG)
+    light = np.array(
+        [
+            np.cos(altitude) * np.cos(azimuth),
+            np.cos(altitude) * np.sin(azimuth),
+            np.sin(altitude),
+        ],
+        dtype=np.float32,
+    )
+
+    # 砂場は真上から見るので視線は (0, 0, 1)。光源との中間ベクトルが
+    # 法線と一致したところが最も強く光る（Blinn-Phong）。
+    halfway = light + np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    halfway /= np.linalg.norm(halfway)
+
+    diffuse = (slope_col * light[0] + slope_row * light[1] + light[2]) / length
+    mirror = (slope_col * halfway[0] + slope_row * halfway[1] + halfway[2]) / length
+
+    diffuse = np.clip(diffuse, 0.0, 1.0)
+    specular = np.clip(mirror, 0.0, 1.0) ** config.WATER_SHININESS
+    return diffuse, specular
+
+
+def _water_color(height_mm, rows, columns, elapsed_s):
+    """水面下の画素を、深さと波の当たり方に応じた色へ変換する。
+
+    浅いほど明るい水色、深いほど濃紺。そこへ波の傾きから求めた拡散光と
+    光源の映り込みを重ね、水際には白波を置く。
+
+    明るさを一様に振るだけでは「青く塗られた窪み」にしか見えない。
+    水らしく見えるのは、細かな波が光源を映してきらめくところと、
+    水際で白く砕けるところなので、その 2 つを出している。
+
+    Args:
+        height_mm: 水面下の画素の高さ[mm] (N,)。
+        rows: その画素の行番号 (N,)。
+        columns: その画素の列番号 (N,)。
+        elapsed_s: 表示を始めてからの経過秒。
+
+    Returns:
+        RGB (N, 3) float32。
+    """
+    # 念のため 0 で止める。負のまま exp に渡すと発散して警告が出る。
+    depth_below = np.clip(config.WATER_LEVEL_MM - height_mm, 0.0, None)
+
     span = config.WATER_LEVEL_MM - config.WATER_DEEP_MM
-    ratio = np.clip((config.WATER_LEVEL_MM - height_mm) / span, 0.0, 1.0)
+    ratio = np.clip(depth_below / span, 0.0, 1.0)
 
     shallow = np.asarray(config.WATER_SHALLOW_COLOR, dtype=np.float32)
     deep = np.asarray(config.WATER_DEEP_COLOR, dtype=np.float32)
     color = shallow + (deep - shallow) * ratio[..., None]
 
-    ripple = 1.0 + config.WATER_WAVE_AMPLITUDE * _wave_field(height_mm.shape, elapsed_s)
-    return color * ripple[..., None]
+    elevation, slope_col, slope_row = _wave_surface(rows, columns, elapsed_s)
+    diffuse, specular = _water_shading(slope_col, slope_row)
+
+    brightness = config.WATER_AMBIENT + config.WATER_DIFFUSE * diffuse
+    color = color * brightness[..., None]
+
+    glint = np.asarray(config.WATER_SPECULAR_COLOR, dtype=np.float32)
+    color = color + glint * (config.WATER_SPECULAR * specular)[..., None]
+
+    if config.WATER_SURF_DEPTH_MM > 0.0:
+        # 水際ほど強く、波の山が来たときだけ白く砕ける。
+        nearness = np.exp(-depth_below / config.WATER_SURF_DEPTH_MM)
+        crest = np.clip(elevation, 0.0, 1.0)
+        foam = nearness * crest * config.WATER_SURF_STRENGTH
+        color = color + (255.0 - color) * foam[..., None]
+
+    return color
 
 
 def _land_color(height_mm):
@@ -185,7 +266,11 @@ def terrain_color(height_mm, elapsed_s=0.0):
     color = _land_color(height) * hillshade(height)[..., None]
 
     under_water = height < config.WATER_LEVEL_MM
-    color = np.where(under_water[..., None], _water_color(height, elapsed_s), color)
+    if under_water.any():
+        # 水面の計算は水のある画素だけで行う。砂場の大半は陸なので、
+        # 全画素ぶん計算すると 3 倍以上の時間がかかる。
+        rows, columns = np.nonzero(under_water)
+        color[under_water] = _water_color(height[under_water], rows, columns, elapsed_s)
 
     return np.clip(color, 0, 255).astype(np.uint8)
 
