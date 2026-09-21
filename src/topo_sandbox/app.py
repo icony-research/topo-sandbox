@@ -265,6 +265,12 @@ class SandboxApp:
             self._adjust_sensitivity(+config.COLOR_SENSITIVITY_DELTA)
         elif key == "s":
             self._adjust_sensitivity(-config.COLOR_SENSITIVITY_DELTA)
+        elif key == "n":
+            self._adjust_water_level(+config.WATER_LEVEL_DELTA_MM)
+        elif key == "m":
+            self._adjust_water_level(-config.WATER_LEVEL_DELTA_MM)
+        elif key == "N":
+            self._reset_water_level()
         # 方向キーは、投影枠の編集中なら選択中の角を 1 画素ずつ動かす。
         # そうでなければエリア全体の平行移動。
         # 左キーで座標を + する（＝画面上では右へ動く）のは元からの挙動。
@@ -305,6 +311,24 @@ class SandboxApp:
         value = max(0.0, min(config.COLOR_SENSITIVITY_MAX, value))
         self.settings.color_sensitivity = value
         self._show_message(f"カラー感度: {value:.1f}")
+
+    def _adjust_water_level(self, delta):
+        value = self.settings.water_level_mm + delta
+        # 範囲外まで動かすと水面が画面から消え、戻し方が分からなくなる。
+        value = max(config.WATER_LEVEL_MIN_MM, min(config.WATER_LEVEL_MAX_MM, value))
+        self.settings.water_level_mm = value
+        self._show_water_level()
+
+    def _reset_water_level(self):
+        self.settings.reset_water_level()
+        self._show_water_level()
+
+    def _show_water_level(self):
+        message = f"水位: {self.settings.water_level_mm:+.0f}mm"
+        if self.settings.view_mode is not ViewMode.DEM:
+            # 他のモードでは水面が出ないので、押しても何も起きないように見える。
+            message += "（DEM 表示で見えます。v で切り替え）"
+        self._show_message(message)
 
     # ------------------------------------------------------------------
     # 基準面の取得

@@ -59,6 +59,8 @@ class RenderSettings:
     z_scale: float = config.Z_SCALE_INITIAL
     color_sensitivity: float = config.COLOR_SENSITIVITY_INITIAL
     show_contour: bool = False
+    #: 水面の高さ[mm]。n / m キーで上下し、Shift + N で初期値へ戻す。
+    water_level_mm: float = config.WATER_LEVEL_MM
     #: センサ側の砂場の四隅。左上から反時計回りに 4 点。
     area_positions: list = field(default_factory=list)
     #: 投影像のどこが砂場かを表す四隅。既定は画面全体。
@@ -69,6 +71,9 @@ class RenderSettings:
     @property
     def has_area(self):
         return len(self.area_positions) == 4
+
+    def reset_water_level(self):
+        self.water_level_mm = config.WATER_LEVEL_MM
 
     def reset_projector_quad(self):
         self.projector_positions = default_projector_quad()
@@ -191,7 +196,9 @@ class Renderer:
             # 水位が漂ってしまう。水面は出さず、従来どおりフレーム内で正規化する。
             dem = overlays.dem_color(depth_view)
         else:
-            dem = self._to_view(overlays.terrain_color(height_mm, self._elapsed()))
+            dem = self._to_view(
+                overlays.terrain_color(height_mm, self._elapsed(), settings.water_level_mm)
+            )
             if self._use_perspective(settings):
                 dem = self._warp(dem, settings)
 

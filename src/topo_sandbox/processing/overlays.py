@@ -52,45 +52,74 @@ def dem_color(depth_image):
     return cv2.cvtColor(image, cv2.COLOR_HSV2RGB_FULL)
 
 
-def _wave_surface(rows, columns, elapsed_s):
-    """水面の起伏と傾きを作る。
+def _wave_surface(rows, columns, elapsed_s, waves, amplitude, warp=None):
+    """波を重ねて、うねりの高さと傾きを作る。
 
-    波長と向きの違う波を重ねる。1 本だけだと縞模様にしか見えない。
-    高さそのものは白波の明滅にしか使わないので、光の当たり方を決める
-    傾きのほうを主に計算している。
+    水面のさざ波にも、溶岩のうねりにも使う。波長と向きの違う波を重ねるのは、
+    1 本だけだと縞模様にしか見えないため。
 
     Args:
         rows: 対象画素の行番号 (N,)。
         columns: 対象画素の列番号 (N,)。
         elapsed_s: 表示を始めてからの経過秒。
+        waves: (波長[画素], 向き[度], 周期[秒], 振れ幅) の並び。
+        amplitude: 全体に掛ける強さ。0 で凪ぐ。
+        warp: 位相をゆがめる波 (波長[画素], 向き[度], 周期[秒], 強さ)。
+            省略すると素直な正弦波の和になる。
 
     Returns:
         (elevation, slope_col, slope_row)。いずれも (N,)。elevation は
-        -1〜1 の波の高さ、slope_* は水面の傾き（列方向・行方向）。
+        -amplitude〜amplitude のうねりの高さ、slope_* はその傾き
+        （列方向・行方向）。
     """
     elevation = np.zeros(rows.shape, dtype=np.float32)
     slope_col = np.zeros(rows.shape, dtype=np.float32)
     slope_row = np.zeros(rows.shape, dtype=np.float32)
+    weight_total = 0.0
 
-    for length_px, direction_deg, period_s, steepness in config.WATER_WAVES:
+    # 位相をゆがめる波。正弦波の和はそのままだと規則正しい格子になるため、
+    # ゆっくりした波で位相をずらして崩す。勾配にも効くので微分も持っておく。
+    warp_phase = 0.0
+    warp_col = 0.0
+    warp_row = 0.0
+    if warp is not None:
+        length_px, direction_deg, period_s, strength = warp
+        direction = np.deg2rad(direction_deg)
+        wave_number = 2.0 * np.pi / length_px
+        phase = wave_number * (columns * np.cos(direction) + rows * np.sin(direction))
+        phase -= 2.0 * np.pi * elapsed_s / period_s
+
+        warp_phase = np.sin(phase) * strength
+        gradient = np.cos(phase) * strength * wave_number
+        warp_col = gradient * np.cos(direction)
+        warp_row = gradient * np.sin(direction)
+
+    for length_px, direction_deg, period_s, steepness in waves:
         direction = np.deg2rad(direction_deg)
         along_col = np.cos(direction)
         along_row = np.sin(direction)
 
         wave_number = 2.0 * np.pi / length_px
-        phase = wave_number * (columns * along_col + rows * along_row)
+        phase = wave_number * (columns * along_col + rows * along_row) + warp_phase
         phase -= 2.0 * np.pi * elapsed_s / period_s
 
-        elevation += np.sin(phase)
+        # 振幅は高さと傾きの両方に掛ける。片方だけに掛けると、
+        # 振幅 0 にしても白波だけが動き続ける。
+        scaled = steepness * amplitude
+        elevation += np.sin(phase) * scaled
 
-        # 傾きは進む向きへ射影する。sin の微分なので cos になる。
-        tilt = np.cos(phase) * steepness * config.WATER_WAVE_AMPLITUDE
-        slope_col += tilt * along_col
-        slope_row += tilt * along_row
+        # 傾きは位相の勾配の向きへ向く。sin の微分なので cos が掛かり、
+        # ゆがみのぶんだけ向きがずれる（合成関数の微分）。
+        tilt = np.cos(phase) * scaled / wave_number
+        slope_col += tilt * (wave_number * along_col + warp_col)
+        slope_row += tilt * (wave_number * along_row + warp_row)
 
-    # 振幅はここでまとめて掛ける。傾きだけに掛けて高さに掛け忘れると、
-    # 振幅 0 にしても白波だけが動き続ける。
-    elevation *= config.WATER_WAVE_AMPLITUDE / max(len(config.WATER_WAVES), 1)
+        weight_total += steepness
+
+    # 設定が空だったり振れ幅がすべて 0 だったりしてもゼロ除算で止まらないこと。
+    if weight_total > 0.0:
+        elevation /= weight_total
+
     return elevation, slope_col, slope_row
 
 
@@ -136,7 +165,7 @@ def _water_shading(slope_col, slope_row):
     return diffuse, specular
 
 
-def _water_color(height_mm, rows, columns, elapsed_s):
+def _water_color(height_mm, rows, columns, elapsed_s, water_level_mm):
     """水面下の画素を、深さと波の当たり方に応じた色へ変換する。
 
     浅いほど明るい水色、深いほど濃紺。そこへ波の傾きから求めた拡散光と
@@ -151,21 +180,24 @@ def _water_color(height_mm, rows, columns, elapsed_s):
         rows: その画素の行番号 (N,)。
         columns: その画素の列番号 (N,)。
         elapsed_s: 表示を始めてからの経過秒。
+        water_level_mm: 水面の高さ[mm]。実演中に n / m キーで上下する。
 
     Returns:
         RGB (N, 3) float32。
     """
     # 念のため 0 で止める。負のまま exp に渡すと発散して警告が出る。
-    depth_below = np.clip(config.WATER_LEVEL_MM - height_mm, 0.0, None)
+    depth_below = np.clip(water_level_mm - height_mm, 0.0, None)
 
-    span = config.WATER_LEVEL_MM - config.WATER_DEEP_MM
-    ratio = np.clip(depth_below / span, 0.0, 1.0)
+    # 濃紺へ振り切るまでの幅は水位からの相対。水位を上げても見え方が変わらない。
+    ratio = np.clip(depth_below / config.WATER_DEEP_SPAN_MM, 0.0, 1.0)
 
     shallow = np.asarray(config.WATER_SHALLOW_COLOR, dtype=np.float32)
     deep = np.asarray(config.WATER_DEEP_COLOR, dtype=np.float32)
     color = shallow + (deep - shallow) * ratio[..., None]
 
-    elevation, slope_col, slope_row = _wave_surface(rows, columns, elapsed_s)
+    elevation, slope_col, slope_row = _wave_surface(
+        rows, columns, elapsed_s, config.WATER_WAVES, config.WATER_WAVE_AMPLITUDE
+    )
     diffuse, specular = _water_shading(slope_col, slope_row)
 
     brightness = config.WATER_AMBIENT + config.WATER_DIFFUSE * diffuse
@@ -200,6 +232,43 @@ def _land_color(height_mm):
     # あとで水の色に置き換わる。
     index = np.digitize(height_mm, bounds[1:])
     return colors[index]
+
+
+def _lava_color(height_mm, rows, columns, elapsed_s):
+    """火口の画素を、溶岩の色へ変換する。
+
+    固まった表面に、溶けた中身が覗く割れ目の網を描く。割れ目は遅いうねりが
+    0 を横切るところで、時間とともにゆっくり形を変える。火口の中心へ
+    近づくほど全体が明るくなる。
+
+    陰影は掛けない。溶岩は自分で光っているものなので、影がつくと
+    ただの赤い岩に見えてしまう。
+
+    Args:
+        height_mm: 火口の画素の高さ[mm] (N,)。
+        rows: その画素の行番号 (N,)。
+        columns: その画素の列番号 (N,)。
+        elapsed_s: 表示を始めてからの経過秒。
+
+    Returns:
+        RGB (N, 3) float32。
+    """
+    above = height_mm - config.VOLCANO_HEIGHT_MM
+    ratio = np.clip(above / config.VOLCANO_SPAN_MM, 0.0, 1.0)
+
+    churn, _, _ = _wave_surface(
+        rows, columns, elapsed_s, config.LAVA_CHURN_WAVES, 1.0, config.LAVA_CHURN_WARP
+    )
+
+    # うねりが 0 を横切るところを光らせると、固まった表面の割れ目から
+    # 溶けた中身が覗いているように見える。うねりの値をそのまま明るさに
+    # すると、正弦波の格子がそのまま出てワッフルのようになる。
+    cracks = np.clip(1.0 - np.abs(churn) / config.LAVA_CRACK_WIDTH, 0.0, 1.0)
+    heat = np.clip(cracks + ratio * config.LAVA_CORE_GLOW, 0.0, 1.0)
+
+    crust = np.asarray(config.LAVA_CRUST_COLOR, dtype=np.float32)
+    molten = np.asarray(config.LAVA_MOLTEN_COLOR, dtype=np.float32)
+    return crust + (molten - crust) * heat[..., None]
 
 
 def hillshade(height_mm):
@@ -245,32 +314,44 @@ def hillshade(height_mm):
     return (1.0 - strength) + strength * shade / np.cos(zenith)
 
 
-def terrain_color(height_mm, elapsed_s=0.0):
-    """基準面からの絶対高さで、水面と標高帯に塗り分ける（DEM 表示）。
+def terrain_color(height_mm, elapsed_s=0.0, water_level_mm=None):
+    """基準面からの絶対高さで、水面・標高帯・火山に塗り分ける（DEM 表示）。
 
-    :func:`dem_color` と違い、フレームごとの正規化をしない。水位を
-    絶対値で決めるため、砂を動かしても水際が動かない。基準面が
-    取れているときだけ使えることに注意（高さの原点が要る）。
+    :func:`dem_color` と違い、フレームごとの正規化をしない。高さを絶対値で
+    見るため、砂を動かしても水際や雪線が動かない。基準面が取れているときだけ
+    使えることに注意（高さの原点が要る）。
 
     Args:
         height_mm: 基準面からの高さ[mm] (H, W)。
-        elapsed_s: 表示を始めてからの経過秒。水面のさざ波を進めるのに使う。
-            省略すると波の止まった状態になる。
+        elapsed_s: 表示を始めてからの経過秒。水面のさざ波と溶岩のうねりを
+            進めるのに使う。省略すると止まった状態になる。
+        water_level_mm: 水面の高さ[mm]。省略すると設定の初期値。
 
     Returns:
         RGB 画像 (H, W, 3) uint8。
     """
     height = np.asarray(height_mm, dtype=np.float32)
+    if water_level_mm is None:
+        water_level_mm = config.WATER_LEVEL_MM
 
-    # 陰影は陸だけに掛ける。水面に影が出ると水に見えない。
+    # 陰影は陸だけに掛ける。水面に影が出ると水に見えず、溶岩に影が出ると
+    # ただの赤い岩に見える。
     color = _land_color(height) * hillshade(height)[..., None]
 
-    under_water = height < config.WATER_LEVEL_MM
+    # 水面と火山の計算は、その画素だけを集めて行う。砂場の大半はどちらでも
+    # ないので、全画素ぶん計算すると DEM の 1 フレームが 2 倍以上に伸びる。
+    molten = height >= config.VOLCANO_HEIGHT_MM
+    if molten.any():
+        rows, columns = np.nonzero(molten)
+        color[molten] = _lava_color(height[molten], rows, columns, elapsed_s)
+
+    # 水位を火山より上まで上げれば火口も沈む。あとから塗るので水が勝つ。
+    under_water = height < water_level_mm
     if under_water.any():
-        # 水面の計算は水のある画素だけで行う。砂場の大半は陸なので、
-        # 全画素ぶん計算すると 3 倍以上の時間がかかる。
         rows, columns = np.nonzero(under_water)
-        color[under_water] = _water_color(height[under_water], rows, columns, elapsed_s)
+        color[under_water] = _water_color(
+            height[under_water], rows, columns, elapsed_s, water_level_mm
+        )
 
     return np.clip(color, 0, 255).astype(np.uint8)
 

@@ -107,7 +107,9 @@ class TestTerrainColor:
 
     def test_深いほど水が濃くなる(self):
         shallow = np.full((10, 10), config.WATER_LEVEL_MM - 5.0, dtype=np.float32)
-        deep = np.full((10, 10), config.WATER_DEEP_MM - 50.0, dtype=np.float32)
+        deep = np.full(
+            (10, 10), config.WATER_LEVEL_MM - config.WATER_DEEP_SPAN_MM - 50.0, dtype=np.float32
+        )
 
         assert int(overlays.terrain_color(deep)[5, 5].sum()) < int(
             overlays.terrain_color(shallow)[5, 5].sum()
@@ -192,7 +194,9 @@ class TestWaterWaves:
     def test_波は水深の濃淡を消さない(self, elapsed_s):
         """振幅が大きすぎると、浅瀬と深場の区別がつかなくなる。"""
         shallow = self._water(5.0)
-        deep = np.full((40, 40), config.WATER_DEEP_MM - 50.0, dtype=np.float32)
+        deep = np.full(
+            (40, 40), config.WATER_LEVEL_MM - config.WATER_DEEP_SPAN_MM - 50.0, dtype=np.float32
+        )
 
         assert int(overlays.terrain_color(deep, elapsed_s).sum()) < int(
             overlays.terrain_color(shallow, elapsed_s).sum()
@@ -250,3 +254,90 @@ class TestWaterLighting:
     def test_全面が水でも落ちない(self):
         result = overlays.terrain_color(self._water(150.0), 1.0)
         assert result.shape == (60, 60, 3)
+
+
+class TestWaterLevel:
+    def test_水位を上げると陸が沈む(self):
+        land = np.full((20, 20), 0.0, dtype=np.float32)
+
+        dry = overlays.terrain_color(land, 0.0, water_level_mm=-40.0)
+        flooded = overlays.terrain_color(land, 0.0, water_level_mm=20.0)
+
+        # 水は青が勝ち、陸（低地の緑）は赤が青を上回る
+        assert flooded[..., 2].mean() > flooded[..., 0].mean()
+        assert dry[..., 0].mean() > dry[..., 2].mean()
+
+    def test_水位を下げると水が引く(self):
+        hollow = np.full((20, 20), -50.0, dtype=np.float32)
+
+        flooded = overlays.terrain_color(hollow, 0.0, water_level_mm=-40.0)
+        dry = overlays.terrain_color(hollow, 0.0, water_level_mm=-100.0)
+
+        # 現れるのは砂浜。淡い色なので青も高いが、赤が上回る
+        assert flooded[..., 2].mean() > flooded[..., 0].mean()
+        assert dry[..., 0].mean() > dry[..., 2].mean()
+
+    def test_水位を動かしても水の濃さは変わらない(self):
+        """濃紺までの幅を水位からの相対にしてあること。
+
+        絶対値のままだと、水位を上げたとき水全体が薄い水色に寝てしまう。
+        """
+        colors = set()
+        for level in (-40.0, 0.0, 60.0):
+            water = np.full((20, 20), level - 30.0, dtype=np.float32)
+            colors.add(tuple(overlays.terrain_color(water, 0.0, level)[10, 10]))
+
+        assert len(colors) == 1
+
+    def test_標高帯は水位につられて動かない(self):
+        """地面そのものは変わらないので、帯は絶対高さのまま。"""
+        land = np.full((20, 20), 50.0, dtype=np.float32)
+
+        np.testing.assert_array_equal(
+            overlays.terrain_color(land, 0.0, water_level_mm=-40.0),
+            overlays.terrain_color(land, 0.0, water_level_mm=-100.0),
+        )
+
+
+class TestVolcano:
+    def _peak(self, above_mm=20.0):
+        return np.full((20, 20), config.VOLCANO_HEIGHT_MM + above_mm, dtype=np.float32)
+
+    def test_高く盛ると溶岩になる(self):
+        lava = overlays.terrain_color(self._peak(), 0.0)[10, 10]
+        assert int(lava[0]) - int(lava[2]) > 50
+
+    def test_しきい値未満は雪のまま(self):
+        snow = np.full((20, 20), config.VOLCANO_HEIGHT_MM - 10.0, dtype=np.float32)
+        result = overlays.terrain_color(snow, 0.0)[10, 10]
+
+        np.testing.assert_allclose(result, config.LAND_BANDS[-1][1], atol=1)
+
+    def test_溶岩は時間で揺らぐ(self):
+        peak = self._peak()
+        assert (overlays.terrain_color(peak, 0.0) != overlays.terrain_color(peak, 3.0)).any()
+
+    def test_溶岩に陰影は掛からない(self):
+        """自分で光っているものに影がつくと、ただの赤い岩に見える。"""
+        flat = self._peak()
+        stepped = flat.copy()
+        stepped[:, 10:] += 40.0
+
+        # 段差のすぐ隣の画素。陰影が掛かっていればここに明暗がつく。
+        np.testing.assert_array_equal(
+            overlays.terrain_color(stepped, 0.0)[10, 9],
+            overlays.terrain_color(flat, 0.0)[10, 9],
+        )
+
+    def test_火口の中心ほど明るい(self):
+        rim = overlays.terrain_color(self._peak(0.0), 0.0).astype(np.int32)
+        core = overlays.terrain_color(self._peak(config.VOLCANO_SPAN_MM), 0.0).astype(np.int32)
+
+        assert core.sum() > rim.sum()
+
+    def test_水位を上げれば火口も沈む(self):
+        peak = self._peak()
+        level = config.VOLCANO_HEIGHT_MM + 100.0
+        flooded = overlays.terrain_color(peak, 0.0, water_level_mm=level)[10, 10]
+
+        assert int(flooded[2]) > int(flooded[0])
