@@ -11,9 +11,16 @@ from queue import Queue
 
 from PIL import Image, ImageTk
 
-from . import config
+from . import config, settings_store
 from .processing import plane
-from .renderer import VIEW_MODE_ORDER, MappingMode, Renderer, RenderSettings, ViewMode
+from .renderer import (
+    VIEW_MODE_ORDER,
+    MappingMode,
+    Renderer,
+    RenderSettings,
+    ViewMode,
+    sensor_area_from_view,
+)
 
 
 class SandboxApp:
@@ -66,6 +73,11 @@ class SandboxApp:
         self.window.bind("<KeyPress>", self._on_key)
         self.window.bind("<Tab>", self._select_next_corner)
 
+        # 保存は Ctrl + S。単独の s（カラー感度）と取り違えないよう、
+        # Tk のより詳しい結び付けが優先されることを利用している。
+        self.window.bind("<Control-s>", self._save_settings)
+        self.window.bind("<Control-S>", self._save_settings)
+
         for key, handler in self._area_key_bindings().items():
             self.window.bind(key, handler)
 
@@ -74,6 +86,8 @@ class SandboxApp:
         self.canvas.place(x=0, y=0)
 
         print("エリア指定は左上から反時計回りにクリックしてください。")
+
+        self._load_settings()
 
         self._after_job_id = self.window.after(config.FRAME_INTERVAL_MS, self._tick)
         self.window.mainloop()
@@ -239,8 +253,16 @@ class SandboxApp:
     # ------------------------------------------------------------------
     # キー操作
     # ------------------------------------------------------------------
+    #: event.state のうち Ctrl が押されていることを表すビット（Windows の Tk）
+    _CONTROL_MASK = 0x0004
+
     def _on_key(self, event):
         key = event.keysym
+
+        # Ctrl と一緒に押されたキーはここでは扱わない。Ctrl + S（保存）が
+        # 単独の s（カラー感度）として二重に効かないようにするため。
+        if event.state & self._CONTROL_MASK:
+            return
 
         if key == "v":
             self._cycle_view_mode()
@@ -267,6 +289,8 @@ class SandboxApp:
             self._adjust_sensitivity(-config.COLOR_SENSITIVITY_DELTA)
         elif key == "r":
             self._toggle_rivers()
+        elif key == "R":
+            self._cycle_river_preset()
         elif key == "n":
             self._adjust_water_level(+config.WATER_LEVEL_DELTA_MM)
         elif key == "m":
@@ -321,6 +345,20 @@ class SandboxApp:
             message += "（DEM 表示で見えます。v で切り替え）"
         self._show_message(message)
 
+    def _cycle_river_preset(self):
+        """川の出やすさを切り替える。
+
+        砂場の大きさや砂の作り方で、ちょうどよい量が変わる。config を書き換えて
+        再起動するのでは実演中に間に合わないため、キーで送れるようにしてある。
+        """
+        label, min_cells, _ = self.settings.cycle_river_preset()
+        message = f"川の出やすさ: {label}（流量 {min_cells:.0f} 画素から描く）"
+        if not self.settings.show_rivers:
+            message += "（r で川を表示）"
+        elif self.settings.view_mode is not ViewMode.DEM:
+            message += "（DEM 表示で見えます。v で切り替え）"
+        self._show_message(message)
+
     def _adjust_water_level(self, delta):
         value = self.settings.water_level_mm + delta
         # 範囲外まで動かすと水面が画面から消え、戻し方が分からなくなる。
@@ -338,6 +376,45 @@ class SandboxApp:
             # 他のモードでは水面が出ないので、押しても何も起きないように見える。
             message += "（DEM 表示で見えます。v で切り替え）"
         self._show_message(message)
+
+    # ------------------------------------------------------------------
+    # 設定の保存と読み込み
+    # ------------------------------------------------------------------
+    def _save_settings(self, _event=None):
+        """いまの設定を保存する（Ctrl + S）。
+
+        次の設営で読み込めば、エリア・投影枠・Z スケール・カラー感度・水位・
+        基準面を合わせ直さずに済む。
+        """
+        try:
+            path = settings_store.save(self.settings)
+        except OSError as error:
+            self._show_message(f"設定を保存できませんでした: {error}", duration=200)
+            return "break"
+
+        self._show_message(f"設定を保存しました: {path.name}", duration=200)
+        return "break"  # 単独の s（カラー感度）へ流さない
+
+    def _load_settings(self):
+        """保存した設定があれば読み込む。起動時に 1 度だけ呼ぶ。
+
+        読めなくても既定値で起動する。設定ファイルの不備で実演が始められない、
+        という事態を避けるため。
+        """
+        try:
+            applied = settings_store.load(self.settings)
+        except (OSError, ValueError) as error:
+            self._show_message(f"設定を読み込めませんでした（既定値で起動）: {error}", duration=200)
+            return
+
+        if not applied:
+            return
+
+        message = f"保存した設定を読み込みました（{config.SETTINGS_PATH.name}）"
+        if self.settings.reference_plane is not None:
+            # 前回の設営の基準面がそのまま効く。センサを動かしたなら取り直しが要る。
+            message += f"  {self.settings.reference_plane.describe()}  ※動かしたなら k で取り直し"
+        self._show_message(message, duration=200)
 
     # ------------------------------------------------------------------
     # 基準面の取得
@@ -365,8 +442,15 @@ class SandboxApp:
         self._finish_plane_capture(frames)
 
     def _finish_plane_capture(self, frames):
+        # 平面は砂場の中だけであてはめる。センサの視野には砂場の枠や床、
+        # まわりに立っている人まで入っており、それらを含めると基準面が
+        # 砂面から離れて傾く（平らにならした砂の高さが 0 にならない）。
+        area = None
+        if self.settings.has_area:
+            area = sensor_area_from_view(self.settings.area_positions)
+
         try:
-            reference = plane.capture(frames)
+            reference = plane.capture(frames, area=area)
         except ValueError as error:
             self._show_message(f"基準面を取得できませんでした: {error}", duration=200)
             return
@@ -374,6 +458,10 @@ class SandboxApp:
         self.settings.reference_plane = reference
 
         message = reference.describe()
+        if area is None:
+            # 視野全体で求めた基準面は砂場からずれる。黙って使うと
+            # 「なぜか高さが合わない」という形でしか現れないので明示する。
+            message += "  ※エリア未指定のため視野全体で求めました"
         if reference.residual_mm > config.PLANE_RESIDUAL_WARN_MM:
             message += "  ※砂がならせていない可能性があります"
         self._show_message(message, duration=200)

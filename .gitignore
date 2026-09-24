@@ -562,3 +562,6 @@ FodyWeavers.xsd
 /outputs/
 *.pcd
 .ruff_cache/
+
+# 現場で合わせた値（機材ごとに違うので追跡しない）
+/settings.json

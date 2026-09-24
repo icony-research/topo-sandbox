@@ -11,6 +11,17 @@ from topo_sandbox import config
 from topo_sandbox.processing import overlays
 
 
+@pytest.fixture
+def 火山を退かす(monkeypatch):
+    """標高帯だけを見るため、火山のしきい値を帯より上へ退かす。
+
+    `VOLCANO_HEIGHT_MM` は現場で調整する値で、砂の量によっては帯より下へ
+    下げることもある（下げると、それより上の帯は溶岩に置き換わる）。
+    帯そのものの試験がその調整で落ちないようにする。
+    """
+    monkeypatch.setattr(config, "VOLCANO_HEIGHT_MM", config.LAND_BANDS[-1][0] + 1000.0)
+
+
 def _gradient(height=60, width=80):
     """上から下へ滑らかに明るくなる深度画像。"""
     column = np.linspace(0, 255, height, dtype=np.uint8)
@@ -52,18 +63,74 @@ class TestEdgeLines:
         assert result.max() == 0
 
 
+def _slope(low_mm=-150.0, high_mm=250.0, height=200, width=40):
+    """上から下へ一定の割合で高くなる斜面。高さ[mm] (H, W)。"""
+    column = np.linspace(low_mm, high_mm, height, dtype=np.float32)
+    return np.repeat(column[:, None], width, axis=1)
+
+
+class TestContourInterval:
+    def test_ふつうは設定した間隔(self):
+        assert overlays.contour_interval(_slope(0.0, 100.0)) == config.CONTOUR_INTERVAL_MM
+
+    def test_起伏が広いときは間隔を広げる(self):
+        """本数で打ち切ると、いちばん高いところにだけ線が出なくなる。"""
+        span = config.CONTOUR_INTERVAL_MM * config.CONTOUR_LEVELS * 3
+        interval = overlays.contour_interval(_slope(0.0, span))
+
+        assert interval == config.CONTOUR_INTERVAL_MM * 3
+        assert span / interval <= config.CONTOUR_LEVELS
+
+    def test_平らでも割り算で落ちない(self):
+        flat = np.zeros((10, 10), dtype=np.float32)
+        assert overlays.contour_interval(flat) == config.CONTOUR_INTERVAL_MM
+
+
 class TestDrawContours:
+    def _canvas(self, height_mm):
+        return np.full((height_mm.shape[0], height_mm.shape[1], 3), 255, dtype=np.uint8)
+
     def test_等高線が描き込まれる(self):
-        depth = _gradient()
-        canvas = np.full((depth.shape[0], depth.shape[1], 3), 255, dtype=np.uint8)
-        result = overlays.draw_contours(depth, canvas.copy())
+        height = _slope(0.0, 100.0)
+        result = overlays.draw_contours(height, self._canvas(height))
         assert (result != 255).any()
 
-    @pytest.mark.parametrize("value", [0, 255])
-    def test_一様な深度でも落ちない(self, value):
-        depth = np.full((20, 20), value, dtype=np.uint8)
-        canvas = np.zeros((20, 20, 3), dtype=np.uint8)
-        overlays.draw_contours(depth, canvas)
+    def test_高く盛ったところにも線が出る(self):
+        """**実機で出た不具合。** 8bit の表示画像から線を引いていたときは、
+        中央値を中心とした幅 256mm の窓の外（高く盛ったところ）に線が出なかった。
+        """
+        height = _slope(-150.0, 250.0)
+        result = overlays.draw_contours(height, self._canvas(height))
+
+        # 上 1/4（＝いちばん高いところ）にも線があること。
+        top = result[: len(result) // 4]
+        assert (top != 255).any()
+
+    def test_間隔を指定できる(self):
+        """間隔を広げれば線は減る。"""
+        height = _slope(0.0, 100.0)
+        dense = (overlays.draw_contours(height, self._canvas(height), 5.0) != 255).sum()
+        sparse = (overlays.draw_contours(height, self._canvas(height), 20.0) != 255).sum()
+        assert sparse < dense
+
+    def test_線の間隔が高さに比例する(self):
+        """緩い斜面では線がまばらに、急な斜面では密になる。"""
+        gentle = _slope(0.0, 50.0)
+        steep = _slope(0.0, 200.0)
+
+        drawn = [(overlays.draw_contours(h, self._canvas(h)) != 255).sum() for h in (gentle, steep)]
+        assert drawn[0] < drawn[1]
+
+    @pytest.mark.parametrize("value", [-100.0, 0.0, 100.0])
+    def test_平らでも落ちない(self, value):
+        height = np.full((20, 20), value, dtype=np.float32)
+        overlays.draw_contours(height, np.zeros((20, 20, 3), dtype=np.uint8))
+
+    def test_グレースケールにも描ける(self):
+        """深度表示のモードでは、白黒の画像へそのまま重ねる。"""
+        height = _slope(0.0, 100.0)
+        canvas = np.full(height.shape, 255, dtype=np.uint8)
+        assert (overlays.draw_contours(height, canvas) != 255).any()
 
 
 def _dome(size=60, peak_mm=100.0, spread=15.0):
@@ -127,14 +194,14 @@ class TestTerrainColor:
             overlays.terrain_color(stepped)[10, 9], overlays.terrain_color(flat)[10, 9]
         )
 
-    def test_一番上の帯は雪になる(self):
+    def test_一番上の帯は雪になる(self, 火山を退かす):
         lower_mm, color = config.LAND_BANDS[-1]
         height = np.full((10, 10), lower_mm + 10.0, dtype=np.float32)
 
         # 平坦地なので陰影は 1.0。設定した色がそのまま出る。
         np.testing.assert_allclose(overlays.terrain_color(height)[5, 5], color, atol=1)
 
-    def test_標高帯ごとに色が変わる(self):
+    def test_標高帯ごとに色が変わる(self, 火山を退かす):
         colors = set()
         for lower_mm, _ in config.LAND_BANDS:
             height = np.full((10, 10), lower_mm + 1.0, dtype=np.float32)
@@ -307,11 +374,23 @@ class TestVolcano:
         lava = overlays.terrain_color(self._peak(), 0.0)[10, 10]
         assert int(lava[0]) - int(lava[2]) > 50
 
-    def test_しきい値未満は雪のまま(self):
-        snow = np.full((20, 20), config.VOLCANO_HEIGHT_MM - 10.0, dtype=np.float32)
-        result = overlays.terrain_color(snow, 0.0)[10, 10]
+    def test_しきい値未満は標高帯の色のまま(self):
+        """しきい値は現場で動かすので、どの帯に落ちるかは決め打ちにしない。"""
+        below_mm = config.VOLCANO_HEIGHT_MM - 10.0
+        expected = [color for lower_mm, color in config.LAND_BANDS if lower_mm <= below_mm][-1]
 
-        np.testing.assert_allclose(result, config.LAND_BANDS[-1][1], atol=1)
+        land = np.full((20, 20), below_mm, dtype=np.float32)
+        result = overlays.terrain_color(land, 0.0)[10, 10]
+
+        np.testing.assert_allclose(result, expected, atol=1)
+
+    def test_溶岩は赤みが強い(self):
+        """割れ目を黄色一色にすると電球に見える。赤を通してから明るくする。"""
+        lava = overlays.terrain_color(self._peak(), 0.0).astype(np.float32)
+        red, green, blue = lava.reshape(-1, 3).mean(axis=0)
+
+        assert red > green * 1.5
+        assert green > blue
 
     def test_溶岩は時間で揺らぐ(self):
         peak = self._peak()

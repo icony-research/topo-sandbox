@@ -5,12 +5,17 @@ import pytest
 
 from topo_sandbox.processing.plane import (
     ReferencePlane,
+    area_mask,
     average_frames,
     capture,
     fit_plane,
 )
 
 SHAPE = (240, 320)
+
+#: 砂場とみなす画素の範囲（行 60〜179、列 80〜239）
+SANDBOX_ROWS = slice(60, 180)
+SANDBOX_COLUMNS = slice(80, 240)
 
 
 def _tilted_depth(distance_mm=1000.0, slope_u=0.0, slope_v=0.0, shape=SHAPE):
@@ -69,6 +74,80 @@ class TestFitPlane:
             fit_plane(depth)
 
 
+def _sandbox_area(shape=SHAPE):
+    """:data:`SANDBOX_ROWS` / :data:`SANDBOX_COLUMNS` を正規化座標の四隅にする。"""
+    height, width = shape
+    u0 = SANDBOX_COLUMNS.start / (width - 1)
+    u1 = (SANDBOX_COLUMNS.stop - 1) / (width - 1)
+    v0 = SANDBOX_ROWS.start / (height - 1)
+    v1 = (SANDBOX_ROWS.stop - 1) / (height - 1)
+    return [[u0, v0], [u0, v1], [u1, v1], [u1, v0]]
+
+
+def _sandbox_scene(sand_mm=1000.0, floor_mm=1500.0, floor_slope=0.0):
+    """砂場のまわりに床が写り込んだ深度画像。
+
+    砂場の外のほうが広く、床は砂面より遠い。設営時に実際に起こる状況。
+    """
+    floor = _tilted_depth(distance_mm=floor_mm, slope_u=floor_slope)
+    floor[SANDBOX_ROWS, SANDBOX_COLUMNS] = sand_mm
+    return floor
+
+
+class TestAreaMask:
+    def test_四隅の内側だけが立つ(self):
+        mask = area_mask(SHAPE, _sandbox_area())
+        assert mask[120, 160]  # 砂場の中
+        assert not mask[10, 10]  # 砂場の外
+        assert mask.sum() == pytest.approx(120 * 160, rel=0.02)
+
+    def test_解像度が違っても同じ範囲を指す(self):
+        """正規化座標なので、センサ解像度でも処理解像度でも使える。"""
+        small = area_mask((120, 160), _sandbox_area())
+        assert small.mean() == pytest.approx(area_mask(SHAPE, _sandbox_area()).mean(), abs=0.01)
+
+
+class TestFitPlaneArea:
+    def test_砂場の外の床を巻き込まない(self):
+        """視野全体であてはめると、基準面が砂面から離れてしまう。"""
+        scene = _sandbox_scene()
+
+        inside = fit_plane(scene, area=_sandbox_area())
+        assert inside.distance_mm == pytest.approx(1000.0, abs=1.0)
+        assert inside.residual_mm == pytest.approx(0.0, abs=0.1)
+
+        # 範囲を絞らないと、砂場より広い床に引きずられる。
+        assert fit_plane(scene).distance_mm > 1200.0
+
+    def test_砂場の外の傾きに引きずられない(self):
+        """床が傾いていても、砂場の中が平らなら基準面は平らになる。"""
+        scene = _sandbox_scene(floor_slope=400.0)
+
+        result = fit_plane(scene, area=_sandbox_area())
+        assert result.tilt_deg == pytest.approx(0.0, abs=0.05)
+        assert result.distance_mm == pytest.approx(1000.0, abs=1.0)
+
+    def test_平らにならした砂の高さが0になる(self):
+        """ねらいはこれ。砂場の中の高さが 0 になれば水位が成立する。"""
+        scene = _sandbox_scene()
+        heights = fit_plane(scene, area=_sandbox_area()).heights(scene)
+        assert np.abs(heights[SANDBOX_ROWS, SANDBOX_COLUMNS]).max() < 0.5
+
+    def test_有効画素の割合は砂場を母数にする(self):
+        scene = _sandbox_scene()
+        scene[60:120, SANDBOX_COLUMNS] = 0  # 砂場の半分が欠測
+
+        result = fit_plane(scene, area=_sandbox_area())
+        assert result.coverage == pytest.approx(50.0, abs=2.0)
+
+    def test_砂場に有効な深度が無いと例外(self):
+        scene = _sandbox_scene()
+        scene[SANDBOX_ROWS, SANDBOX_COLUMNS] = 0
+
+        with pytest.raises(ValueError, match="エリアの四隅"):
+            fit_plane(scene, area=_sandbox_area())
+
+
 class TestHeights:
     def test_傾いた面が平らになる(self):
         """傾き補正の本題。斜めに取り付けても平らな砂は平らに出る。"""
@@ -122,6 +201,11 @@ class TestCapture:
         result = capture(frames)
         assert isinstance(result, ReferencePlane)
         assert result.a == pytest.approx(50.0, abs=0.5)
+
+    def test_砂場の範囲を渡せる(self):
+        frames = [_sandbox_scene() for _ in range(3)]
+        result = capture(frames, area=_sandbox_area())
+        assert result.distance_mm == pytest.approx(1000.0, abs=1.0)
 
     def test_要約が読める形で出る(self):
         text = capture([_tilted_depth()]).describe()

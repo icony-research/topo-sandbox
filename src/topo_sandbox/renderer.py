@@ -43,6 +43,28 @@ def default_projector_quad():
     return [[0, 0], [0, height], [width, height], [width, 0]]
 
 
+def sensor_area_from_view(positions):
+    """表示像の上で指定した砂場の四隅を、センサ画像の正規化座標へ戻す。
+
+    エリアの四隅は投影解像度の画面をクリックして決めるが、その画面は
+    `Renderer._to_view` が拡大して**左右反転**したあとの像である。
+    センサ画像の座標として使うには反転を戻す必要があり、u を 1 から
+    引いているのはそのため。符号を「揃える」と左右が入れ替わり、
+    砂場の反対側で基準面をあてはめることになる。
+
+    正規化して返すのは、センサ解像度と処理解像度のどちらへでも
+    そのまま当てられるようにするため（基準面と同じ考え方）。
+
+    Args:
+        positions: 表示像での四隅 [[x, y], ...]（:data:`config.VIEW_SIZE` の画素）。
+
+    Returns:
+        正規化座標 (u, v) の四隅の並び。
+    """
+    width, height = config.VIEW_SIZE
+    return [[1.0 - x / width, y / height] for x, y in positions]
+
+
 class MappingMode(enum.Enum):
     """投影範囲の扱い。`j` キーで切り替える。"""
 
@@ -61,6 +83,8 @@ class RenderSettings:
     show_contour: bool = False
     #: 川（流量）を重ねるか。r キーで切り替える。
     show_rivers: bool = False
+    #: 川の出やすさ（config.RIVER_PRESETS の添字）。Shift + R で切り替える。
+    river_preset: int = config.RIVER_PRESET_INITIAL
     #: 水面の高さ[mm]。n / m キーで上下し、Shift + N で初期値へ戻す。
     water_level_mm: float = config.WATER_LEVEL_MM
     #: センサ側の砂場の四隅。左上から反時計回りに 4 点。
@@ -73,6 +97,20 @@ class RenderSettings:
     @property
     def has_area(self):
         return len(self.area_positions) == 4
+
+    @property
+    def river_setting(self):
+        """川の出やすさ (表示名, 描き始める流量, 最も濃くなる流量)。
+
+        添字は剰余で丸める。設定ファイルから読んだ値が範囲外でも、実演中に
+        添字エラーで止めないため。
+        """
+        return config.RIVER_PRESETS[self.river_preset % len(config.RIVER_PRESETS)]
+
+    def cycle_river_preset(self):
+        """川の出やすさを次の段階へ送る。"""
+        self.river_preset = (self.river_preset + 1) % len(config.RIVER_PRESETS)
+        return self.river_setting
 
     def reset_water_level(self):
         self.water_level_mm = config.WATER_LEVEL_MM
@@ -112,7 +150,9 @@ class Renderer:
             表示用の画像。彩色系は RGB (600, 800, 3)、深度表示のみ
             グレースケール (600, 800)。
         """
-        depth_mm = depth.preprocess(depth_frame)
+        # 欠測の穴埋めにも基準面を使う。周囲から埋められない大きな穴を
+        # 中央値で埋めると、視野に入った砂場の外に引きずられて窪地になる。
+        depth_mm = depth.preprocess(depth_frame, settings.reference_plane)
 
         # 基準面からの高さ[mm]。基準面があればセンサの傾きも打ち消される。
         height_mm = pointcloud.heights_from_depth(depth_mm, settings.reference_plane)
@@ -123,11 +163,11 @@ class Renderer:
 
         mode = settings.view_mode
         if mode is ViewMode.COLORING:
-            return self._render_coloring(height_mm, display, settings)
+            return self._render_coloring(height_mm, settings)
         if mode is ViewMode.DEM:
             return self._render_dem(height_mm, display, settings)
         if mode is ViewMode.DEPTH:
-            return self._render_depth(display, settings)
+            return self._render_depth(height_mm, display, settings)
         if mode is ViewMode.EDGE:
             return self._render_edge(height_mm, settings)
         raise ValueError(f"未知の表示モード: {mode!r}")
@@ -182,16 +222,24 @@ class Renderer:
         return self._to_view(image)
 
     # ------------------------------------------------------------------
-    def _render_coloring(self, height_mm, display, settings):
+    def _draw_contours(self, height_mm, canvas, settings):
+        """等高線を重ねる。
+
+        等高線だけは拡大したあとに描く。線の太さを投影解像度で決めたいのと、
+        輪郭抽出が処理解像度では粗すぎるため。高さ[mm]をそのまま投影側へ
+        運ぶのは、8bit の表示画像が窓でクリップされており、高く盛ったところに
+        線が出なかったため。
+        """
+        return overlays.draw_contours(self._to_projection(height_mm, settings), canvas)
+
+    def _render_coloring(self, height_mm, settings):
         colored = self._colorize(height_mm, settings)
-        depth_view = self._to_view(display)
 
         if self._use_perspective(settings):
-            depth_view = self._warp(depth_view, settings)
             colored = self._warp(colored, settings)
 
         if settings.show_contour:
-            colored = overlays.draw_contours(depth_view, colored)
+            colored = self._draw_contours(height_mm, colored, settings)
         return colored
 
     def _render_dem(self, height_mm, display, settings):
@@ -208,7 +256,10 @@ class Renderer:
             # 流量は絶対的な高さを要らない（下る向きだけで決まる）ので、
             # 基準面が無くても川は出せる。こちらは投影解像度で混ぜるしかない。
             if settings.show_rivers:
-                strength = self._to_projection(rivers.river_strength(height_mm), settings)
+                _, min_cells, full_cells = settings.river_setting
+                strength = self._to_projection(
+                    rivers.river_strength(height_mm, min_cells, full_cells), settings
+                )
                 dem = overlays.draw_rivers(dem, strength)
         else:
             terrain = overlays.terrain_color(height_mm, self._elapsed(), settings.water_level_mm)
@@ -217,7 +268,9 @@ class Renderer:
             if settings.show_rivers and dry.any():
                 # 水面より下の川は描かない。湖や海に入った川は見えなくなる。
                 # 全部沈んでいるなら流量の計算そのものが要らない。
-                strength = np.where(dry, rivers.river_strength(height_mm), 0.0)
+                _, min_cells, full_cells = settings.river_setting
+                flow = rivers.river_strength(height_mm, min_cells, full_cells)
+                strength = np.where(dry, flow, 0.0)
 
                 # 川は拡大する前に混ぜる。投影解像度で混ぜると触る画素が
                 # 6 倍になり、それだけで 1 フレームの予算の半分を使う。
@@ -226,10 +279,10 @@ class Renderer:
             dem = self._to_projection(terrain, settings)
 
         if settings.show_contour:
-            dem = overlays.draw_contours(depth_view, dem)
+            dem = self._draw_contours(height_mm, dem, settings)
         return dem
 
-    def _render_depth(self, display, settings):
+    def _render_depth(self, height_mm, display, settings):
         depth_view = self._to_view(display)
         depth_view = cv2.bitwise_not(depth_view)
 
@@ -237,7 +290,7 @@ class Renderer:
             depth_view = self._warp(depth_view, settings)
 
         if settings.show_contour:
-            depth_view = overlays.draw_contours(depth_view, depth_view)
+            depth_view = self._draw_contours(height_mm, depth_view, settings)
         return depth_view
 
     def _render_edge(self, height_mm, settings):

@@ -5,6 +5,7 @@
 気づけない。
 """
 
+import cv2
 import numpy as np
 
 from topo_sandbox import config
@@ -164,6 +165,16 @@ class TestRiverStrength:
         # 流れの向きは変わらないので、濃さもそのまま
         np.testing.assert_allclose(shallow, deep, atol=1e-6)
 
+    def test_しきい値を下げると川が増える(self):
+        """Shift + R で「出やすさ」を送ったときに効く道。"""
+        rng = np.random.default_rng(0)
+        terrain = cv2.GaussianBlur(rng.normal(0, 40, (120, 160)).astype(np.float32), (0, 0), 8)
+
+        few = rivers.river_strength(terrain, 60.0, 1200.0)
+        many = rivers.river_strength(terrain, 12.0, 400.0)
+
+        assert (many > 0).sum() > (few > 0).sum()
+
     def test_設定のしきい値より下は描かれない(self):
         """細い筋が大量に出ると地形が読めなくなる。"""
-        assert config.RIVER_MIN_CELLS > 1.0
+        assert all(min_cells > 1.0 for _, min_cells, _ in config.RIVER_PRESETS)

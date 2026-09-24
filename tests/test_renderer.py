@@ -12,6 +12,7 @@ from topo_sandbox.renderer import (
     RenderSettings,
     ViewMode,
     default_projector_quad,
+    sensor_area_from_view,
 )
 
 
@@ -31,6 +32,24 @@ def _apply(matrix, point):
     """射影変換を 1 点に適用する。"""
     source = np.array([[point]], dtype=np.float32)
     return cv2.perspectiveTransform(source, matrix)[0][0]
+
+
+class TestSensorAreaFromView:
+    def test_左右反転を戻す(self):
+        """表示像は左右反転されているので、u は 1 から引いた値になる。
+
+        符号を揃えると、砂場の反対側で基準面をあてはめることになる。
+        """
+        width, height = config.VIEW_SIZE
+        area = sensor_area_from_view([[0, 0], [width, height]])
+        assert area[0] == pytest.approx([1.0, 0.0])
+        assert area[1] == pytest.approx([0.0, 1.0])
+
+    def test_正規化座標で返す(self):
+        """センサ解像度にも処理解像度にも当てられるよう 0〜1 にする。"""
+        width, height = config.VIEW_SIZE
+        area = sensor_area_from_view([[width // 4, height // 2]])
+        assert area[0] == pytest.approx([0.75, 0.5])
 
 
 class TestDefaultProjectorQuad:
@@ -137,6 +156,34 @@ def _dem_settings(**overrides):
         coverage=99.0,
     )
     return _settings(view_mode=ViewMode.DEM, reference_plane=plane, **overrides)
+
+
+class TestMissingDepthIsNotWater:
+    """測れなかった画素が水面にならないこと。
+
+    盛った山の頂上がセンサの最短測定距離より近づくと欠測になる。これを
+    視野全体の中央値で埋めていたときは、砂場の外の床に引きずられて
+    山の頂上が深い水になっていた（実機で「高さが逆」に見えた原因）。
+    """
+
+    def test_山の頂上が測れなくても水にならない(self, renderer):
+        width, height = config.SENSOR_SIZE
+        rows, columns = np.mgrid[0:height, 0:width]
+        inside = (np.abs(rows - height / 2) < height / 4) & (
+            np.abs(columns - width / 2) < width / 4
+        )
+
+        frame = np.where(inside, _BASE_MM, _BASE_MM + 250.0)  # 砂場の外は遠い床
+        squared = (rows - height / 2) ** 2 + (columns - width / 2) ** 2
+        frame = frame - 200.0 * np.exp(-squared / (2 * 60.0**2))  # 盛った山
+        frame = np.where(frame < 800.0, 0.0, frame)  # 最短測定距離より近い所は欠測
+
+        settings = _dem_settings(mapping_mode=MappingMode.NORMAL)
+        image = renderer.render(frame.astype(np.float32), settings)
+
+        # 山の頂上は投影像の中央。水（青）ではなく陸の色になる。
+        red, green, blue = image[image.shape[0] // 2, image.shape[1] // 2]
+        assert not (blue > red and blue > green), f"頂上が水になっている: {(red, green, blue)}"
 
 
 class TestWaterAnimationClock:

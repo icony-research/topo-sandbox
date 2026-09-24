@@ -101,7 +101,7 @@ def flow_accumulation(directions, cell_count, iterations):
     return accumulation
 
 
-def river_strength(height_mm):
+def river_strength(height_mm, min_cells=None, full_cells=None):
     """川らしさを 0〜1 で返す。1 に近いほど水が集まっている。
 
     流量の計算は繰り返しが重いので、いったん :data:`config.RIVER_SIZE` まで
@@ -114,10 +114,16 @@ def river_strength(height_mm):
 
     Args:
         height_mm: 高さ[mm] (H, W)。
+        min_cells: 川として描き始める流量[画素]。省略すると起動時の設定。
+        full_cells: 色が最も濃くなる流量[画素]。省略すると起動時の設定。
 
     Returns:
         入力と同じ大きさの 0〜1 (H, W) float32。
     """
+    _, initial_min, initial_full = config.RIVER_PRESETS[config.RIVER_PRESET_INITIAL]
+    min_cells = initial_min if min_cells is None else min_cells
+    full_cells = initial_full if full_cells is None else full_cells
+
     height = np.asarray(height_mm, dtype=np.float32)
     coarse = cv2.resize(height, dsize=config.RIVER_SIZE, interpolation=cv2.INTER_AREA)
 
@@ -125,8 +131,8 @@ def river_strength(height_mm):
     accumulation = flow_accumulation(directions, coarse.size, config.RIVER_ITERATIONS)
 
     # 流量は上流から下流へ一気に増えるので、対数で見ないと本流だけが真っ青になる。
-    lower = np.log(config.RIVER_MIN_CELLS)
-    upper = np.log(config.RIVER_FULL_CELLS)
+    lower = np.log(min_cells)
+    upper = np.log(full_cells)
     strength = (np.log(accumulation) - lower) / (upper - lower)
     strength = np.clip(strength, 0.0, 1.0).reshape(coarse.shape)
 

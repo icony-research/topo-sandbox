@@ -256,19 +256,30 @@ def _lava_color(height_mm, rows, columns, elapsed_s):
     above = height_mm - config.VOLCANO_HEIGHT_MM
     ratio = np.clip(above / config.VOLCANO_SPAN_MM, 0.0, 1.0)
 
-    churn, _, _ = _wave_surface(
-        rows, columns, elapsed_s, config.LAVA_CHURN_WAVES, 1.0, config.LAVA_CHURN_WARP
-    )
-
     # うねりが 0 を横切るところを光らせると、固まった表面の割れ目から
     # 溶けた中身が覗いているように見える。うねりの値をそのまま明るさに
     # すると、正弦波の格子がそのまま出てワッフルのようになる。
-    cracks = np.clip(1.0 - np.abs(churn) / config.LAVA_CRACK_WIDTH, 0.0, 1.0)
+    #
+    # 向きの違う 2 組の割れ目を重ねる（明るいほうを採る）。1 組だと割れ目が
+    # 一方向へ揃って櫛の跡のように見え、割れた岩に見えない。
+    cracks = np.zeros(rows.shape, dtype=np.float32)
+    for waves, warp in config.LAVA_CHURN_LAYERS:
+        churn, _, _ = _wave_surface(rows, columns, elapsed_s, waves, 1.0, warp)
+        layer = np.clip(1.0 - np.abs(churn) / config.LAVA_CRACK_WIDTH, 0.0, 1.0)
+        cracks = np.maximum(cracks, layer)
+
     heat = np.clip(cracks + ratio * config.LAVA_CORE_GLOW, 0.0, 1.0)
 
-    crust = np.asarray(config.LAVA_CRUST_COLOR, dtype=np.float32)
-    molten = np.asarray(config.LAVA_MOLTEN_COLOR, dtype=np.float32)
-    return crust + (molten - crust) * heat[..., None]
+    # 固まった表面 → 赤熱 → 最も熱いところ、の 3 段をたどる。黒から黄へ
+    # 直接つなぐと、溶けた岩ではなく電球のように見える。
+    stops = np.asarray(
+        [config.LAVA_CRUST_COLOR, config.LAVA_GLOW_COLOR, config.LAVA_MOLTEN_COLOR],
+        dtype=np.float32,
+    )
+    position = heat * (len(stops) - 1)
+    lower = np.clip(np.floor(position), 0, len(stops) - 2).astype(np.int32)
+    blend = (position - lower)[..., None]
+    return stops[lower] * (1.0 - blend) + stops[lower + 1] * blend
 
 
 def hillshade(height_mm):
@@ -401,29 +412,61 @@ def draw_rivers(canvas, strength):
     return canvas
 
 
-def draw_contours(depth_image, canvas):
-    """等高線を描き込む。
+def contour_interval(height_mm, interval_mm=None):
+    """実際に使う等高線の間隔[mm]を返す。
 
-    しきい値を変えながら二値化と輪郭抽出を繰り返し、得られた輪郭を
-    黒線で重ねる。等高線の間隔は :data:`config.CONTOUR_THRESHOLD_STEP` で決まる。
+    起伏が広すぎて :data:`config.CONTOUR_LEVELS` 本に収まらないときは、間隔を
+    整数倍に広げる。本数で打ち切ると、いちばん高いところ（＝子どもが盛り上げた
+    山）にだけ線が出なくなってしまうため。
 
     Args:
-        depth_image: 8bit の深度画像 (H, W)。
-        canvas: 描き込み先の画像。
+        height_mm: 高さ[mm]。
+        interval_mm: 等高線の間隔[mm]。省略すると設定値。
+
+    Returns:
+        間隔[mm] float。
+    """
+    interval = float(interval_mm or config.CONTOUR_INTERVAL_MM)
+
+    height = np.asarray(height_mm, dtype=np.float32)
+    span = float(height.max()) - float(height.min())
+    if not np.isfinite(span) or span <= 0.0 or interval <= 0.0:
+        return interval
+
+    # 上限を超えるぶんだけ広げる。3.2 倍必要なら 4 倍にする。
+    crowding = int(np.ceil(span / interval / config.CONTOUR_LEVELS))
+    return interval * max(crowding, 1)
+
+
+def draw_contours(height_mm, canvas, interval_mm=None):
+    """等高線を描き込む。
+
+    高さを一定間隔で区切り、区切りが変わる境目を黒い線にする。しきい値ごとに
+    輪郭を抽出していたときは 1 フレームに 8ms 掛かっていたが、この方法なら
+    本数によらず一定で済む。
+
+    **8bit の深度画像ではなく高さ[mm]を直接見る。** 表示用の 8bit は中央値を
+    中心とした幅 256mm の窓へ押し込んであり、窓の外は端の値に張り付く。そこから
+    線を引いていたときは **ある高さより上に等高線が出ず**、しかも窓の中心が
+    フレームごとに動くため、線の消える高さが砂を動かすたびに変わっていた。
+
+    Args:
+        height_mm: 投影解像度の高さ[mm] (H, W)。
+        canvas: 描き込み先の画像。白黒でも RGB でもよい。
+        interval_mm: 等高線の間隔[mm]。省略すると設定値。
 
     Returns:
         等高線を描き込んだ画像。
     """
-    threshold = config.CONTOUR_THRESHOLD_START
+    height = np.asarray(height_mm, dtype=np.float32)
+    interval = contour_interval(height, interval_mm)
 
-    for _ in range(config.CONTOUR_LEVELS):
-        _, binary = cv2.threshold(depth_image, threshold, 255, cv2.THRESH_BINARY)
-        contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    # 何本目の帯に入るかへ落とし、隣と番号が違うところが等高線になる。
+    band = np.floor(height / interval)
 
-        for contour in contours:
-            points = np.reshape(contour, (len(contour), 2))
-            canvas = cv2.polylines(canvas, [points], True, (0, 0, 0))
+    on_line = np.zeros(band.shape, dtype=bool)
+    on_line[:, 1:] |= band[:, 1:] != band[:, :-1]
+    on_line[1:, :] |= band[1:, :] != band[:-1, :]
 
-        threshold += config.CONTOUR_THRESHOLD_STEP
-
+    canvas[on_line] = 0
     return canvas
