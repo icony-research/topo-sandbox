@@ -393,3 +393,17 @@ Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\D
 - **v2.1** — 深度をミリメートルのまま扱うようにし、WPF 時代から引き継いでいた 8bit 切り捨て（256mm 周期の折り返し）を解消。欠測画素の穴埋めも追加。
 - **v2.0** — 送信側の C# アプリ（WPF）を廃止し、Python から Kinect SDK を直接利用する構成へ移行。あわせてパッケージ構成へ再編し、テストと lint を整備。
 - **v1.x** — C# の WPF アプリが深度フレームを TCP で配信し、Python 側が受信して彩色する 2 プロセス構成。
+
+---
+
+## ライセンス
+
+[MIT License](LICENSE) — Copyright (c) 2026 ICONYAMATO Co., Ltd.
+
+依存パッケージ（numpy / OpenCV / Open3D / Pillow / CuPy / pythonnet）はいずれも
+このリポジトリには同梱しておらず、実行時に import するだけです。
+
+**Kinect for Windows SDK 1.8 は本リポジトリには含まれません。** 利用者が各自で
+インストールし、`Microsoft.Kinect.dll` を SDK のインストール先から読み込みます
+（[sensor/kinect.py](src/topo_sandbox/sensor/kinect.py)）。SDK の利用条件は
+マイクロソフトの使用許諾に従ってください。

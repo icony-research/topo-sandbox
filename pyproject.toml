@@ -8,6 +8,7 @@ version = "2.3.0"
 description = "Kinect v1 で砂場の起伏を計測し、傾斜に応じて着色した映像を投影する TopoSandbox"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
 
 # 実際に導入するバージョンは requirements.txt で固定している。
 # GPU 世代に合わせて cupy を選ぶ必要があるため、ここでは cupy を宣言しない。
