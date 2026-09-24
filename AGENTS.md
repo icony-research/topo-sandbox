@@ -195,7 +195,9 @@ scripts\run.bat             実機で最終確認
 
 - **現場で合わせた値は `settings_store` が JSON へ保存します（Ctrl + S / 起動時に読み込み）。**
   `RenderSettings` に現場で調整する項目を足したら、`settings_store._PLAIN_FIELDS` にも
-  足してください。保存の形を変えるときは `FORMAT_VERSION` を上げます（版が違う
+  足してください。**実演中に触る値なら `renderer._ADJUSTMENT_FIELDS` にも足します**
+  （Ctrl + R で初期値へ戻る範囲。設営ぶんは Ctrl + Shift + R のほうに入れる）。
+  保存の形を変えるときは `FORMAT_VERSION` を上げます（版が違う
   ファイルは読まずに既定値で起動します）。読み込みは項目ごとに検証し、壊れた項目だけを
   捨てます。設定が読めないくらいで実演を止めないための作りです。
 

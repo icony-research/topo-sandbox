@@ -72,6 +72,20 @@ class MappingMode(enum.Enum):
     PERSPECTIVE = 1  #: 指定した四隅を画面全体へ引き伸ばす
 
 
+#: :meth:`RenderSettings.reset_adjustments` が初期値へ戻す項目。
+#: 設営ぶん（area_positions / projector_positions / reference_plane）は含めない。
+_ADJUSTMENT_FIELDS = (
+    "view_mode",
+    "mapping_mode",
+    "z_scale",
+    "color_sensitivity",
+    "show_contour",
+    "show_rivers",
+    "river_preset",
+    "water_level_mm",
+)
+
+
 @dataclass
 class RenderSettings:
     """現場で調整する値。キー操作で書き換わる。"""
@@ -117,6 +131,26 @@ class RenderSettings:
 
     def reset_projector_quad(self):
         self.projector_positions = default_projector_quad()
+
+    def reset_adjustments(self):
+        """実演中に触る調整値だけを初期値へ戻す。
+
+        設営ぶん（エリアの四隅・投影枠・基準面）は残す。合わせ直すのに
+        時間が掛かるうえ、実演の最中に消えると立て直せないため。
+        """
+        defaults = RenderSettings()
+        for name in _ADJUSTMENT_FIELDS:
+            setattr(self, name, getattr(defaults, name))
+
+    def reset_all(self):
+        """設営ぶんも含めて、すべて初期値へ戻す。
+
+        設定ファイルには触らない。書き戻すかどうかは Ctrl + S で選ぶ。
+        """
+        self.reset_adjustments()
+        self.area_positions = []
+        self.projector_positions = default_projector_quad()
+        self.reference_plane = None
 
 
 class Renderer:

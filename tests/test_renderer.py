@@ -186,6 +186,60 @@ class TestMissingDepthIsNotWater:
         assert not (blue > red and blue > green), f"頂上が水になっている: {(red, green, blue)}"
 
 
+class TestReset:
+    """初期値へ戻す 2 段階。"""
+
+    def _adjusted(self):
+        plane = ReferencePlane(
+            a=1.0, b=2.0, c=1000.0, residual_mm=1.0, tilt_deg=1.0, distance_mm=1000.0, coverage=90.0
+        )
+        return _settings(
+            view_mode=ViewMode.DEM,
+            mapping_mode=MappingMode.PERSPECTIVE,
+            z_scale=0.3,
+            color_sensitivity=3.5,
+            show_contour=True,
+            show_rivers=True,
+            river_preset=3,
+            water_level_mm=20.0,
+            area_positions=[[1, 2], [3, 4], [5, 6], [7, 8]],
+            projector_positions=[[9, 9], [9, 90], [90, 90], [90, 9]],
+            reference_plane=plane,
+        )
+
+    def test_調整値だけ戻す(self):
+        settings = self._adjusted()
+        settings.reset_adjustments()
+
+        defaults = RenderSettings()
+        assert settings.z_scale == defaults.z_scale
+        assert settings.color_sensitivity == defaults.color_sensitivity
+        assert settings.water_level_mm == defaults.water_level_mm
+        assert settings.river_preset == defaults.river_preset
+        assert settings.view_mode is defaults.view_mode
+        assert settings.mapping_mode is defaults.mapping_mode
+        assert not settings.show_contour and not settings.show_rivers
+
+    def test_設営は残す(self):
+        """合わせ直すのに時間が掛かる。実演中に消えると立て直せない。"""
+        settings = self._adjusted()
+        setup = ("area_positions", "projector_positions", "reference_plane")
+        before = {name: getattr(settings, name) for name in setup}
+
+        settings.reset_adjustments()
+
+        assert {name: getattr(settings, name) for name in setup} == before
+
+    def test_すべて戻すと設営も消える(self):
+        settings = self._adjusted()
+        settings.reset_all()
+
+        assert settings.area_positions == []
+        assert settings.projector_positions == default_projector_quad()
+        assert settings.reference_plane is None
+        assert settings.z_scale == RenderSettings().z_scale
+
+
 class TestContourStability:
     """センサの揺れで等高線が踊らないこと（実機で出た不具合）。
 

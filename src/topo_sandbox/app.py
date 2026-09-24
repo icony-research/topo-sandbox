@@ -78,6 +78,12 @@ class SandboxApp:
         self.window.bind("<Control-s>", self._save_settings)
         self.window.bind("<Control-S>", self._save_settings)
 
+        # 初期値へ戻す。Ctrl + R は調整値だけ、Ctrl + Shift + R は設営ぶんも。
+        # 設営を消すほうを Shift 付きにしているのは、実演中に誤って押しても
+        # エリアや基準面が飛ばないようにするため（`c` を無効にしてあるのと同じ考え）。
+        self.window.bind("<Control-r>", self._reset_adjustments)
+        self.window.bind("<Control-R>", self._reset_all)
+
         for key, handler in self._area_key_bindings().items():
             self.window.bind(key, handler)
 
@@ -394,6 +400,27 @@ class SandboxApp:
 
         self._show_message(f"設定を保存しました: {path.name}", duration=200)
         return "break"  # 単独の s（カラー感度）へ流さない
+
+    def _reset_adjustments(self, _event=None):
+        """調整値を初期値へ戻す（Ctrl + R）。設営ぶんは残す。"""
+        self.settings.reset_adjustments()
+        self._show_message(
+            "調整値を初期値へ戻しました（エリア・投影枠・基準面はそのまま）",
+            duration=200,
+        )
+        return "break"
+
+    def _reset_all(self, _event=None):
+        """設営ぶんも含めてすべて初期値へ戻す（Ctrl + Shift + R）。"""
+        self.settings.reset_all()
+        self._projector_corner = 0
+        self._projector_edit = False
+        self._show_message(
+            "すべて初期値へ戻しました。エリアを 4 点クリックし、k で基準面を取り直してください"
+            f"（{config.SETTINGS_PATH.name} を書き換えるには Ctrl + S）",
+            duration=200,
+        )
+        return "break"
 
     def _load_settings(self):
         """保存した設定があれば読み込む。起動時に 1 度だけ呼ぶ。

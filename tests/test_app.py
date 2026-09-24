@@ -140,6 +140,45 @@ class TestSettingsKeys:
         assert "既定値で起動" in app._message
 
 
+class TestResetKeys:
+    def test_調整値を戻しても設営は残る(self):
+        app = _app()
+        app.settings.area_positions = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        app.settings.water_level_mm = 40.0
+
+        app._reset_adjustments()
+
+        assert app.settings.water_level_mm == config.WATER_LEVEL_MM
+        assert app.settings.area_positions == [[1, 2], [3, 4], [5, 6], [7, 8]]
+        assert "エリア・投影枠・基準面はそのまま" in app._message
+
+    def test_すべて戻すと設営も消える(self):
+        app = _app()
+        app.settings.area_positions = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        app._projector_edit = True
+
+        app._reset_all()
+
+        assert app.settings.area_positions == []
+        assert app.settings.reference_plane is None
+        assert not app._projector_edit  # 投影枠の編集モードからも抜ける
+        assert "すべて初期値へ戻しました" in app._message
+
+    def test_戻しても保存は消さない(self, tmp_path, monkeypatch):
+        """書き戻すかどうかは Ctrl + S で選ぶ。"""
+        monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
+
+        app = _app()
+        app.settings.water_level_mm = 40.0
+        app._save_settings()
+
+        app._reset_all()
+        restored = _app()
+        restored._load_settings()
+
+        assert restored.settings.water_level_mm == 40.0
+
+
 class TestRiverPresetKey:
     def test_出やすさを切り替えられる(self):
         app = _app()
