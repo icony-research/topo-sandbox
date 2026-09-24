@@ -18,7 +18,7 @@ from .processing import coloring, depth, overlays, pointcloud, rivers
 class ViewMode(enum.Enum):
     """表示モード。`v` キーでこの順に巡回する。"""
 
-    COLORING = 0  #: 傾斜による彩色（本命）
+    COLORING = 0  #: 傾斜による彩色
     DEPTH = 1  #: 深度をそのまま白黒で
     DEM = 2  #: 標高による色分けと水面
     EDGE = 3  #: 傾斜の変化線
