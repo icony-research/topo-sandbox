@@ -186,6 +186,46 @@ class TestMissingDepthIsNotWater:
         assert not (blue > red and blue > green), f"頂上が水になっている: {(red, green, blue)}"
 
 
+class TestContourStability:
+    """センサの揺れで等高線が踊らないこと（実機で出た不具合）。
+
+    深度を時間方向に均すのと、等高線の帯を覚えておくのと、二段構えで抑えている。
+    """
+
+    def _noisy_frames(self, count, noise_mm=3.0):
+        rng = np.random.default_rng(0)
+        base = _frame_with_pool()
+        for _ in range(count):
+            # Kinect は 2mm 刻みで、静止していてもフレームごとに揺れる。
+            noisy = base + rng.normal(0, noise_mm, base.shape)
+            yield (np.round(noisy / 2.0) * 2.0).astype(np.float32)
+
+    def _line_swap_ratio(self, renderer, settings):
+        previous = None
+        swapped = []
+        for frame in self._noisy_frames(12):
+            image = renderer.render(frame, settings)
+            line = image.sum(axis=2) < 60  # 黒い線の画素
+            if previous is not None:
+                swapped.append((line != previous).sum() / max(line.sum(), 1))
+            previous = line
+        return float(np.mean(swapped))
+
+    def test_砂を動かさなければ線もほとんど動かない(self):
+        settings = _dem_settings(show_contour=True)
+        assert self._line_swap_ratio(Renderer(), settings) < 0.05
+
+    def test_抑えを外すと線が踊る(self):
+        """抑えが効いていることの裏取り。外すと入れ替わりが桁で増える。"""
+        settings = _dem_settings(show_contour=True)
+
+        renderer = Renderer()
+        renderer._stabilizer.smoothing = 1.0
+        renderer._contours.hysteresis_mm = 0.0
+
+        assert self._line_swap_ratio(renderer, settings) > 0.5
+
+
 class TestWaterAnimationClock:
     """水面のさざ波はフレーム数ではなく時計で進む。
 

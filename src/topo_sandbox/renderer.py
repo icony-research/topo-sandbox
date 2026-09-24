@@ -134,6 +134,12 @@ class Renderer:
         self._clock = clock
         self._started_at = clock()
 
+        # どちらも前のフレームを覚えている。センサの揺れで等高線や標高帯の
+        # 境目が踊るのを抑えるため。`app._tick` がワーカを 1 つしか走らせない
+        # ので、順番に呼ばれることは保証されている。
+        self._stabilizer = depth.TemporalStabilizer()
+        self._contours = overlays.ContourBands()
+
     def _elapsed(self):
         """表示を始めてからの経過秒。"""
         return self._clock() - self._started_at
@@ -153,6 +159,10 @@ class Renderer:
         # 欠測の穴埋めにも基準面を使う。周囲から埋められない大きな穴を
         # 中央値で埋めると、視野に入った砂場の外に引きずられて窪地になる。
         depth_mm = depth.preprocess(depth_frame, settings.reference_plane)
+
+        # 動いていないところの揺れを均す。砂を動かした画素はそのまま通るので、
+        # 追従は遅れない。
+        depth_mm = self._stabilizer.apply(depth_mm)
 
         # 基準面からの高さ[mm]。基準面があればセンサの傾きも打ち消される。
         height_mm = pointcloud.heights_from_depth(depth_mm, settings.reference_plane)
@@ -226,11 +236,15 @@ class Renderer:
         """等高線を重ねる。
 
         等高線だけは拡大したあとに描く。線の太さを投影解像度で決めたいのと、
-        輪郭抽出が処理解像度では粗すぎるため。高さ[mm]をそのまま投影側へ
-        運ぶのは、8bit の表示画像が窓でクリップされており、高く盛ったところに
-        線が出なかったため。
+        処理解像度では線が粗すぎるため。高さ[mm]をそのまま投影側へ運ぶのは、
+        8bit の表示画像が窓でクリップされており、高く盛ったところに線が
+        出なかったため。
+
+        帯は :class:`~topo_sandbox.processing.overlays.ContourBands` が覚えていて、
+        センサの揺れで線が 1 画素ぶん踊るのを抑える。毎フレーム引き直すと、
+        砂を動かしていなくても線が細かく動く。
         """
-        return overlays.draw_contours(self._to_projection(height_mm, settings), canvas)
+        return self._contours.draw(self._to_projection(height_mm, settings), canvas)
 
     def _render_coloring(self, height_mm, settings):
         colored = self._colorize(height_mm, settings)

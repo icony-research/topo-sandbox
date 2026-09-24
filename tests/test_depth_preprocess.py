@@ -1,9 +1,16 @@
 """欠測の穴埋めと表示用階調への変換の検証。GPU も Kinect も不要。"""
 
 import numpy as np
+import pytest
 
 from topo_sandbox import config
-from topo_sandbox.processing.depth import INVALID_DEPTH, fill_invalid, preprocess, to_display
+from topo_sandbox.processing.depth import (
+    INVALID_DEPTH,
+    TemporalStabilizer,
+    fill_invalid,
+    preprocess,
+    to_display,
+)
 
 
 class _FlatPlane:
@@ -158,3 +165,63 @@ class TestPreprocess:
         depth[:4, :4] = 1250  # ほぼ全面が欠測
         result = preprocess(depth, _FlatPlane(1000.0))
         assert abs(float(result[120, 160]) - 1000.0) < 1.0  # 処理解像度の中央
+
+
+class TestTemporalStabilizer:
+    """静止しているところの揺れだけを時間方向に均す。"""
+
+    def _noisy(self, rng, base=1000.0, noise_mm=1.0, shape=(60, 80)):
+        return (base + rng.normal(0, noise_mm, shape)).astype(np.float32)
+
+    def test_静止した砂場の揺れが減る(self):
+        rng = np.random.default_rng(0)
+        stabilizer = TemporalStabilizer()
+
+        stabilizer.apply(self._noisy(rng))
+        raw, smoothed = [], []
+        for _ in range(30):
+            frame = self._noisy(rng)
+            raw.append(frame)
+            smoothed.append(stabilizer.apply(frame))
+
+        # 時間方向のばらつき（画素ごとの標準偏差の平均）で比べる
+        assert np.std(smoothed, axis=0).mean() < np.std(raw, axis=0).mean() / 2
+
+    def test_大きく動いた画素は遅れない(self):
+        """手を入れた・砂を崩したといった変化にはその場で追従すること。"""
+        stabilizer = TemporalStabilizer(smoothing=0.3, motion_mm=5.0)
+        flat = np.full((10, 10), 1000.0, dtype=np.float32)
+        stabilizer.apply(flat)
+
+        moved = flat.copy()
+        moved[5, 5] -= 40.0  # 40mm 盛った
+        result = stabilizer.apply(moved)
+
+        assert result[5, 5] == pytest.approx(960.0)  # そのまま通る
+        assert result[0, 0] == pytest.approx(1000.0)
+
+    def test_最初のフレームはそのまま返る(self):
+        stabilizer = TemporalStabilizer()
+        frame = np.full((4, 4), 1234.0, dtype=np.float32)
+        np.testing.assert_allclose(stabilizer.apply(frame), frame)
+
+    def test_解像度が変わっても落ちない(self):
+        """再生モードと実機を切り替えたときなど。"""
+        stabilizer = TemporalStabilizer()
+        stabilizer.apply(np.full((10, 10), 1000.0, dtype=np.float32))
+        result = stabilizer.apply(np.full((20, 20), 1000.0, dtype=np.float32))
+        assert result.shape == (20, 20)
+
+    def test_1なら素通しになる(self):
+        """揺れが気になるとき以外は切れる、という逃げ道。"""
+        stabilizer = TemporalStabilizer(smoothing=1.0)
+        stabilizer.apply(np.full((4, 4), 1000.0, dtype=np.float32))
+        frame = np.full((4, 4), 900.0, dtype=np.float32)
+        np.testing.assert_allclose(stabilizer.apply(frame), frame)
+
+    def test_忘れさせられる(self):
+        stabilizer = TemporalStabilizer()
+        stabilizer.apply(np.full((4, 4), 1000.0, dtype=np.float32))
+        stabilizer.reset()
+        frame = np.full((4, 4), 900.0, dtype=np.float32)
+        np.testing.assert_allclose(stabilizer.apply(frame), frame)

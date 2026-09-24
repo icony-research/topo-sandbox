@@ -86,6 +86,58 @@ class TestContourInterval:
         assert overlays.contour_interval(flat) == config.CONTOUR_INTERVAL_MM
 
 
+class TestContourBands:
+    """センサの揺れで等高線が踊らないこと。"""
+
+    def _height(self, rng=None, noise_mm=0.0):
+        height = _slope(0.0, 100.0, height=120, width=40)
+        if rng is not None:
+            height = height + rng.normal(0, noise_mm, height.shape).astype(np.float32)
+        return height.astype(np.float32)
+
+    def test_揺れでは帯がほとんど動かない(self):
+        """**実機で出た不具合。** 砂を動かしていないのに線が細かく踊っていた。
+
+        平滑化のあとに残る揺れ（0.2mm ほど）を与え、帯が入れ替わる回数を
+        ヒステリシス有り／無しで比べる。
+        """
+        rng = np.random.default_rng(0)
+        frames = [self._height(rng, noise_mm=0.2) for _ in range(20)]
+        base = self._height()
+        interval = config.CONTOUR_INTERVAL_MM
+
+        def changes(bands):
+            first = bands.of(base, interval).copy()
+            return sum(int((bands.of(frame, interval) != first).sum()) for frame in frames)
+
+        steady = changes(overlays.ContourBands())
+        raw = changes(overlays.ContourBands(hysteresis_mm=0.0))
+
+        assert steady * 10 < raw
+
+    def test_本当に越えれば帯が変わる(self):
+        """砂を動かせば線も動くこと。ヒステリシスは余裕のぶんだけ。"""
+        bands = overlays.ContourBands(hysteresis_mm=0.5)
+        base = self._height()
+        first = bands.of(base, 5.0).copy()
+
+        moved = bands.of(base + 20.0, 5.0)  # 20mm 盛る＝4 帯ぶん
+        assert np.allclose(moved - first, 4.0)
+
+    def test_間隔が変われば覚え直す(self):
+        bands = overlays.ContourBands()
+        base = self._height()
+        bands.of(base, 5.0)
+        assert np.allclose(bands.of(base, 20.0), np.floor(base / 20.0))
+
+    def test_忘れさせられる(self):
+        bands = overlays.ContourBands()
+        base = self._height()
+        bands.of(base, 5.0)
+        bands.reset()
+        np.testing.assert_allclose(bands.of(base + 0.2, 5.0), np.floor((base + 0.2) / 5.0))
+
+
 class TestDrawContours:
     def _canvas(self, height_mm):
         return np.full((height_mm.shape[0], height_mm.shape[1], 3), 255, dtype=np.uint8)

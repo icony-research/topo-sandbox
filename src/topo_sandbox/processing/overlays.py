@@ -438,17 +438,92 @@ def contour_interval(height_mm, interval_mm=None):
     return interval * max(crowding, 1)
 
 
-def draw_contours(height_mm, canvas, interval_mm=None):
-    """等高線を描き込む。
+class ContourBands:
+    """高さを等高線の帯へ落とす。前のフレームの帯を覚えてちらつきを抑える。
 
-    高さを一定間隔で区切り、区切りが変わる境目を黒い線にする。しきい値ごとに
-    輪郭を抽出していたときは 1 フレームに 8ms 掛かっていたが、この方法なら
-    本数によらず一定で済む。
+    等高線は帯の境目なので、緩い斜面では深度のわずかな揺れで線が 1 画素ぶん
+    左右に動く。実測では、**砂を動かしていないのに 1 フレームごとに線の画素の
+    100% 以上が入れ替わっていた**（センサの揺れ σ=3mm のとき）。境目を少し
+    越えるまで前の帯を保つと、入れ替わりは 3% まで下がる。
+
+    砂を実際に動かせば、境目を越えた時点で線も動く。遅れるのは
+    :data:`config.CONTOUR_HYSTERESIS_MM` のぶん（既定 0.5mm）だけ。
+    """
+
+    def __init__(self, hysteresis_mm=None):
+        """
+        Args:
+            hysteresis_mm: 帯を保つ余裕[mm]。0 にすると毎フレーム引き直す。
+        """
+        if hysteresis_mm is None:
+            hysteresis_mm = config.CONTOUR_HYSTERESIS_MM
+        self.hysteresis_mm = hysteresis_mm
+        self._bands = None
+        self._interval = None
+
+    def reset(self):
+        """覚えている帯を捨てる。"""
+        self._bands = None
+        self._interval = None
+
+    def of(self, height_mm, interval):
+        """高さ[mm]を帯の番号へ落とす。
+
+        Args:
+            height_mm: 高さ[mm] (H, W)。
+            interval: 等高線の間隔[mm]。
+
+        Returns:
+            帯の番号 (H, W) float32。
+        """
+        height = np.asarray(height_mm, dtype=np.float32)
+        bands = np.floor(height / interval)
+
+        previous = self._bands
+        usable = (
+            self.hysteresis_mm > 0.0
+            and previous is not None
+            and previous.shape == bands.shape
+            and self._interval == interval
+        )
+        if usable:
+            # 前の帯の上下に余裕を付けた範囲にいるあいだは、前の帯を保つ。
+            lower = previous * interval - self.hysteresis_mm
+            upper = (previous + 1.0) * interval + self.hysteresis_mm
+            bands = np.where((height >= lower) & (height <= upper), previous, bands)
+
+        self._bands = bands
+        self._interval = interval
+        return bands
+
+    def draw(self, height_mm, canvas, interval_mm=None):
+        """等高線を描き込む。引数と戻り値は :func:`draw_contours` と同じ。"""
+        height = np.asarray(height_mm, dtype=np.float32)
+        bands = self.of(height, contour_interval(height, interval_mm))
+
+        # 隣と帯の番号が違うところが等高線になる。しきい値ごとに輪郭を
+        # 抽出していたときは 1 フレーム 8ms 掛かっていたが、この方法なら
+        # 本数によらず一定で済む。
+        on_line = np.zeros(bands.shape, dtype=bool)
+        on_line[:, 1:] |= bands[:, 1:] != bands[:, :-1]
+        on_line[1:, :] |= bands[1:, :] != bands[:-1, :]
+
+        canvas[on_line] = 0
+        return canvas
+
+
+def draw_contours(height_mm, canvas, interval_mm=None):
+    """等高線を描き込む（1 フレームだけの版）。
+
+    高さを一定間隔で区切り、区切りが変わる境目を黒い線にする。
 
     **8bit の深度画像ではなく高さ[mm]を直接見る。** 表示用の 8bit は中央値を
     中心とした幅 256mm の窓へ押し込んであり、窓の外は端の値に張り付く。そこから
     線を引いていたときは **ある高さより上に等高線が出ず**、しかも窓の中心が
     フレームごとに動くため、線の消える高さが砂を動かすたびに変わっていた。
+
+    続けて描くときは :class:`ContourBands` を使い回すこと。1 枚ごとに引き直すと、
+    センサの揺れで線が細かく踊る。
 
     Args:
         height_mm: 投影解像度の高さ[mm] (H, W)。
@@ -458,15 +533,4 @@ def draw_contours(height_mm, canvas, interval_mm=None):
     Returns:
         等高線を描き込んだ画像。
     """
-    height = np.asarray(height_mm, dtype=np.float32)
-    interval = contour_interval(height, interval_mm)
-
-    # 何本目の帯に入るかへ落とし、隣と番号が違うところが等高線になる。
-    band = np.floor(height / interval)
-
-    on_line = np.zeros(band.shape, dtype=bool)
-    on_line[:, 1:] |= band[:, 1:] != band[:, :-1]
-    on_line[1:, :] |= band[1:, :] != band[:-1, :]
-
-    canvas[on_line] = 0
-    return canvas
+    return ContourBands().draw(height_mm, canvas, interval_mm)

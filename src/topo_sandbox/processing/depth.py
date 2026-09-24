@@ -108,6 +108,64 @@ def preprocess(depth_mm, reference_plane=None):
     return cv2.blur(depth, config.BLUR_KERNEL)
 
 
+class TemporalStabilizer:
+    """静止しているところの揺れだけを、時間方向に均す。
+
+    Kinect の深度は砂場が静止していてもフレームごとに揺れる。空間方向の
+    平滑化（:data:`config.BLUR_KERNEL`）のあとでも 0.2mm ほど残り、緩い斜面では
+    これだけで等高線や標高帯の境目が 1 画素ぶん左右に動く。何もしていないのに
+    線が細かく踊って見えるのはこのため。
+
+    前のフレームと混ぜれば揺れは減るが、そのまま混ぜると手や崩した砂まで
+    尾を引く。**大きく変わった画素は混ぜずに新しい値を採る**ことで、
+    止まっているところだけを静める。
+
+    1 つのインスタンスを使い回して状態を持つ。`Renderer` が 1 つ持ち、
+    ワーカスレッドから順番に呼ぶ（同時に 2 つ走らないことは `app._tick` が
+    保証している）。
+    """
+
+    def __init__(self, smoothing=None, motion_mm=None):
+        """
+        Args:
+            smoothing: 新しいフレームの重み。1.0 で均さない。
+            motion_mm: これを超えて変わった画素は均さない[mm]。
+        """
+        self.smoothing = config.DEPTH_SMOOTHING if smoothing is None else smoothing
+        self.motion_mm = config.DEPTH_MOTION_MM if motion_mm is None else motion_mm
+        self._previous = None
+
+    def reset(self):
+        """溜めた状態を捨てる。次のフレームはそのまま通す。"""
+        self._previous = None
+
+    def apply(self, depth_mm):
+        """深度[mm]を均して返す。
+
+        Args:
+            depth_mm: 深度[mm] (H, W)。
+
+        Returns:
+            均した深度[mm] (H, W) float32。
+        """
+        depth = np.asarray(depth_mm, dtype=np.float32)
+        previous = self._previous
+
+        # 解像度が変わったら比べようがない。最初のフレームも同じ扱い。
+        if self.smoothing >= 1.0 or previous is None or previous.shape != depth.shape:
+            self._previous = depth
+            return depth
+
+        blended = previous + (depth - previous) * self.smoothing
+
+        # 本物の変化には遅れない。揺れの何倍も大きい変化だけを通す。
+        moved = np.abs(depth - previous) > self.motion_mm
+        stabilized = np.where(moved, depth, blended).astype(np.float32)
+
+        self._previous = stabilized
+        return stabilized
+
+
 def to_display(depth_mm, span_mm=None):
     """深度[mm]を表示用の 8bit グレースケールへ落とす。
 
