@@ -13,6 +13,7 @@ import numpy as np
 
 from . import config
 from .processing import coloring, depth, overlays, pointcloud, rivers
+from .recorder import frame_context
 
 
 class ViewMode(enum.Enum):
@@ -63,6 +64,63 @@ def sensor_area_from_view(positions):
     """
     width, height = config.VIEW_SIZE
     return [[1.0 - x / width, y / height] for x, y in positions]
+
+
+#: 砂場の四隅がこれより狭い面積しか囲んでいなければ、切り取らない[画素^2]。
+#: 4 点が 1 点に集まったり一直線に並んだりすると変換が定まらず、
+#: cv2 は例外を出さずに真っ黒な結果を返す。黙って 0mm の平面を録るより断るほうがよい。
+_MIN_CROP_AREA_PX = 16.0
+
+
+def crop_to_area(height_mm, area_positions, size=None):
+    """砂場の四隅の内側だけを切り出し、長方形の格子へ直す。
+
+    録画（``--record --record-crop``）で使う。センサの視野には砂場の枠や床、
+    まわりに立っている人まで入っており、そのまま点群にすると砂場の何倍もの
+    広さに床が窪地として広がり、前を横切った人が高い壁として残る。
+
+    行き先の四隅は :func:`default_projector_quad` と同じ並びなので、**画面で
+    最初にクリックした角が左上に来る。** エリアの四隅は左右反転したあとの
+    表示像で指定するため、出てくるのは投影像と同じ向きの絵になる（センサから
+    見たままの並びではない）。切り取ったものを読む側が取り違えないよう、
+    meta.json の ``axes`` にもそう書く。
+
+    x と y は砂場の端から端までを等分したもので、ミリメートルではない。
+    四隅の間隔は設営のたびに変わるため、ここで長さを決めようがない。
+
+    Args:
+        height_mm: 高さ[mm] (H, W)。
+        area_positions: 表示像での砂場の四隅 [[x, y], ...]（左上から反時計回りに 4 点）。
+        size: 出力の大きさ (幅, 高さ)。省略すると :data:`config.PROC_SIZE`。
+
+    Returns:
+        切り出した高さ[mm] (height, width) float32。四隅が一直線に並ぶなどで
+        変換を作れないときは None。
+    """
+    width, height = size or config.PROC_SIZE
+
+    source_height, source_width = np.asarray(height_mm).shape
+    source = np.asarray(
+        [[u * source_width, v * source_height] for u, v in sensor_area_from_view(area_positions)],
+        dtype=np.float32,
+    )
+    target = np.asarray([[0, 0], [0, height], [width, height], [width, 0]], dtype=np.float32)
+
+    if cv2.contourArea(source) < _MIN_CROP_AREA_PX:
+        return None
+    try:
+        matrix = cv2.getPerspectiveTransform(source, target)
+    except cv2.error:
+        return None
+
+    # 端は外側の値で埋める。既定（0 で埋める）のままだと、砂場のいちばん外側の
+    # 1 列が高さ 0mm になり、点群にしたときに縁だけ基準面へ落ちた段差として出る。
+    return cv2.warpPerspective(
+        np.asarray(height_mm, dtype=np.float32),
+        matrix,
+        (width, height),
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
 
 class MappingMode(enum.Enum):
@@ -156,10 +214,15 @@ class RenderSettings:
 class Renderer:
     """深度フレームから投影用の画像を作る。"""
 
-    def __init__(self, clock=time.monotonic):
+    def __init__(self, clock=time.monotonic, recorder=None, record_crop=False):
         """
         Args:
             clock: 秒を返す関数。水面のさざ波を進めるのに使う。
+            recorder: :class:`~topo_sandbox.recorder.DemRecorder`。
+                与えると DEM 表示のあいだの高さ[mm]を書き出す。
+                `--record` で起動したときだけ渡され、普段は None。
+            record_crop: 書き出すときに砂場の四隅の内側だけを切り出すか
+                （`--record-crop`）。
 
         さざ波をフレーム数ではなく時計で進めるのは、負荷で処理が間に合わない
         フレームを `app._tick` が捨てるため。フレーム数で数えると、混雑した
@@ -167,6 +230,8 @@ class Renderer:
         """
         self._clock = clock
         self._started_at = clock()
+        self.recorder = recorder
+        self.record_crop = record_crop
 
         # どちらも前のフレームを覚えている。センサの揺れで等高線や標高帯の
         # 境目が踊るのを抑えるため。`app._tick` がワーカを 1 つしか走らせない
@@ -177,6 +242,14 @@ class Renderer:
     def _elapsed(self):
         """表示を始めてからの経過秒。"""
         return self._clock() - self._started_at
+
+    def close(self):
+        """抱えているものを片付ける。録画中なら書き残しを書き切る。
+
+        `app._on_close` から呼ばれる。録画していなければ何もしない。
+        """
+        if self.recorder is not None:
+            self.recorder.close()
 
     # ------------------------------------------------------------------
     def render(self, depth_frame, settings):
@@ -291,6 +364,11 @@ class Renderer:
         return colored
 
     def _render_dem(self, height_mm, display, settings):
+        # 点群表示アプリのテスト入力として書き出す（--record のときだけ）。
+        # 描く前に積むのは、重いフレームの描画を待って書き出しが遅れないようにするため。
+        if self.recorder is not None:
+            self._record(height_mm, settings)
+
         depth_view = self._to_view(display)
 
         if self._use_perspective(settings):
@@ -329,6 +407,38 @@ class Renderer:
         if settings.show_contour:
             dem = self._draw_contours(height_mm, dem, settings)
         return dem
+
+    def _record(self, height_mm, settings):
+        """録画へ高さ[mm]を 1 枚渡す。
+
+        書き出すのは投影用の絵ではなく高さ[mm]。穴埋め・平滑化・揺れの抑えと
+        基準面による傾き補正が済んでおり、受け取る側がそのまま点群にできる。
+
+        `--record-crop` では砂場の内側だけを切り出す。**エリアが決まっていない
+        あいだは書き出さない。** 視野全体のフレームを混ぜて書くと、あとから
+        どれが砂場だけなのか見分けられなくなり、録り直すしかなくなるため。
+        黙って止まらないよう、理由を画面へ出す（`app._check_recorder`）。
+        """
+        frame = height_mm
+        area = None
+
+        if self.record_crop:
+            if not settings.has_area:
+                self.recorder.warn(
+                    "録画: 砂場の四隅が未指定のため書き出していません（画面を 4 点クリック）"
+                )
+                return
+            frame = crop_to_area(height_mm, settings.area_positions)
+            if frame is None:
+                self.recorder.warn("録画: 砂場の四隅が潰れていて切り取れません")
+                return
+            area = settings.area_positions
+
+        self.recorder.write(
+            frame,
+            self._elapsed(),
+            frame_context(settings.reference_plane, settings.water_level_mm, area),
+        )
 
     def _render_depth(self, height_mm, display, settings):
         depth_view = self._to_view(display)

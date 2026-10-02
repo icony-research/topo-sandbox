@@ -102,6 +102,9 @@ class SandboxApp:
         if self._after_job_id is not None:
             self.window.after_cancel(self._after_job_id)
         self.source.close()
+        # 録画していれば書き残しを書き切ってから閉じる。ここで閉じないと
+        # 最後の数枚がファイルにならず、meta.json も途中のままになる。
+        self.renderer.close()
         self.window.destroy()
 
     # ------------------------------------------------------------------
@@ -121,6 +124,7 @@ class SandboxApp:
 
         self._draw_latest()
         self._draw_projector_frame()
+        self._check_recorder()
         self._draw_message()
         self._after_job_id = self.window.after(config.FRAME_INTERVAL_MS, self._tick)
 
@@ -141,6 +145,39 @@ class SandboxApp:
             image=self._photo_image,
         )
         self._queue = Queue()
+
+    # ------------------------------------------------------------------
+    # 録画（--record のときだけ）
+    # ------------------------------------------------------------------
+    def _check_recorder(self):
+        """録画が止まったことを画面とコンソールで知らせる。
+
+        録画はワーカスレッドの先の、さらに別スレッドで動いている。上限に
+        達したときやディスクが一杯になったときは**黙って止まる**（実演を
+        止めないため）。気付かないまま記録が途切れるのを避けたいので、
+        メインスレッドでここだけ拾って出す。
+        """
+        recorder = self.renderer.recorder
+        if recorder is None:
+            return
+
+        notice = recorder.take_notice()
+        if notice is not None:
+            print(notice)
+            self._show_message(notice, duration=200)
+
+    def _recording_note(self):
+        """表示モードを切り替えたときに足す、録画の状況。
+
+        録画は DEM 表示のあいだだけ動く。切り替えた拍子に止まったことに
+        気付けないと、あとでファイルを見て初めて分かることになる。
+        """
+        recorder = self.renderer.recorder
+        if recorder is None or not recorder.active:
+            return ""
+        if self.settings.view_mode is ViewMode.DEM:
+            return "（録画中）"
+        return "（録画は DEM 表示のあいだだけ。いまは止まっています）"
 
     # ------------------------------------------------------------------
     # 画面へのメッセージ
@@ -319,7 +356,9 @@ class SandboxApp:
     def _cycle_view_mode(self):
         index = VIEW_MODE_ORDER.index(self.settings.view_mode)
         self.settings.view_mode = VIEW_MODE_ORDER[(index + 1) % len(VIEW_MODE_ORDER)]
-        self._show_message(f"表示モードの切り替え: {self.settings.view_mode.name}")
+        self._show_message(
+            f"表示モードの切り替え: {self.settings.view_mode.name}{self._recording_note()}"
+        )
 
         if self.settings.view_mode is ViewMode.DEM and self.settings.reference_plane is None:
             # 水位は基準面からの絶対高さで決めるため、未取得のままでは出せない。

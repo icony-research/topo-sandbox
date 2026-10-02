@@ -26,6 +26,7 @@ src/topo_sandbox/
   app.py           Tk の画面とキー操作。ワーカスレッドで描画、メインスレッドで表示
   renderer.py      表示モードごとの描画パイプライン。GUI から独立している
   config.py        解像度と調整値。マジックナンバーはここに集約する
+  recorder.py      DEM の高さ[mm]の書き出し（--record）。外部アプリのテスト入力用
   palette.py       配色テーブル（361 色）。生成物に近いデータなので整形対象外
   sensor/          base.py の DepthSource を kinect.py と replay.py が実装
   processing/      depth（欠測の穴埋めと表示階調）/ plane（基準面と傾き補正）/
@@ -55,6 +56,8 @@ src/topo_sandbox/
 scripts\run.bat              通常起動
 scripts\run.bat --replay     Kinect 無しで保存画像を再生
 scripts\run.bat --bench      フレーム取得性能の実測（GUI 無し）
+scripts\run.bat --record     DEM の高さ[mm]を連番ファイルへ書き出す（開発用）
+scripts\run.bat --record --record-crop   砂場の四隅の内側だけを切り出す
 ```
 
 Python を直接叩く場合は **`CUDA_PATH` を CUDA 12.8 に設定**し、**`src` を `PYTHONPATH` に通す**こと。
@@ -192,6 +195,22 @@ scripts\run.bat             実機で最終確認
   関数内で import しています。テストから触れる範囲に GPU 依存を持ち込まないでください。
 - **`sensor/kinect.py` の `_load_kinect_assembly` も遅延 import です。** Kinect SDK の無い環境でも
   モジュール自体は import でき、`to_millimeters` を単体で検証できるようにするためです。
+
+- **録画（`recorder.py`）は実演の付帯物です。** `--record` を付けたときだけ動き、
+  付けなければ `Renderer.recorder` が None のまま何も起きません。書き込みは別
+  スレッドで行い、**間に合わないフレームは捨てます**（溜めるとワーカが書き込みを
+  待たされ、投影が砂場から遅れる）。ディスクが一杯になっても `DemRecorder.write` は
+  例外を外へ出さず、録画だけを止めます。黙って止まると気付けないので、
+  `app._check_recorder` がメインスレッドで知らせを拾って画面に出します。
+  書き出すのが投影像ではなく高さ[mm]なのは、受け取る側がそのまま点群にできる形
+  （穴埋め・平滑化・揺れの抑え・傾き補正が済んだ状態）だからです。
+  `--record-crop` では `renderer.crop_to_area` が砂場の四隅の内側だけを長方形へ直します。
+  エリアは**左右反転したあとの表示像**で指定するので、切り取った絵は投影と同じ向きに
+  なります（センサから見たままの並びではない）。向きの決まりが録り方で変わるため、
+  `meta.json` の `cropped` と `axes` で見分けられるようにしてあります。
+  **エリアが未指定のあいだは書き出しません。** 視野全体のフレームを混ぜて書くと、
+  あとからどれが砂場だけなのか見分けられず、録り直すしかなくなるためです。
+  tests/test_recorder.py で固定しています。
 
 - **現場で合わせた値は `settings_store` が JSON へ保存します（Ctrl + S / 起動時に読み込み）。**
   `RenderSettings` に現場で調整する項目を足したら、`settings_store._PLAIN_FIELDS` にも

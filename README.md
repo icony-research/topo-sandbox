@@ -25,6 +25,7 @@ TopoSandbox/
 │   ├── app.py             Tkinter の画面とキー操作
 │   ├── settings_store.py  現場で合わせた値の保存と読み込み（settings.json）
 │   ├── renderer.py        1 フレーム分の描画パイプライン
+│   ├── recorder.py        DEM の高さ[mm]の書き出し（--record。外部アプリのテスト入力用）
 │   ├── config.py          解像度・調整値などの定数
 │   ├── palette.py         傾斜角 → 色 の変換テーブル（361 色）
 │   ├── sensor/            深度フレームの供給元
@@ -40,7 +41,10 @@ TopoSandbox/
 │       └── overlays.py    DEM・地形（水面と標高帯）・陰影・エッジ・等高線（CPU のみ）
 ├── assets/                README 用の写真
 ├── data/test_frames/      再生モード用の深度画像
-├── scripts/run.bat        起動ランチャ
+├── data/records/          --record で書き出した高さ（追跡しない）
+├── scripts/
+│   ├── run.bat            起動ランチャ
+│   └── view_record.py     録画した .npy を画像として見る
 └── tests/                 Kinect も GPU も不要な範囲のテスト
 ```
 
@@ -137,6 +141,7 @@ run.bat              通常起動
 run.bat --replay     Kinect 無しで保存画像を再生（動作確認用）
 run.bat --near       Near Mode（Kinect for Windows センサのみ）
 run.bat --bench      フレーム取得性能の実測（GUI 無し）
+run.bat --record     DEM の高さを書き出す（開発用。「DEM の高さを書き出す」参照）
 ```
 
 800×600 のウィンドウが開きます。`F11` で全画面（枠なし最大化）に切り替え、プロジェクタ側のディスプレイへ移動して使用します。
@@ -239,6 +244,112 @@ ruff format .          整形
 ```
 
 テストは Kinect と GPU を必要としない範囲（深度変換・欠測の穴埋め・表示用階調・配色テーブル・点群化・DEM／地形／陰影／等高線）を対象にしています。**彩色本体と GUI は実機での確認が必要**です。`--replay` を使うと Kinect 無しで画面まで通せます。
+
+### DEM の高さを書き出す（`--record`）
+
+砂場の起伏を点群にして別のディスプレイへ出すアプリを作るとき、その**テスト入力**を
+本機から取り出すための機能です。**`--record` を付けなければ何も起きません。**
+通常の起動手順もキーバインドも変わりません。
+
+```bat
+run.bat --record                         既定（data/records/ へ、上限 1800 枚）
+run.bat --record --record-crop           砂場の四隅の内側だけを切り出す
+run.bat --record --record-dir D:\dem      書き出し先を変える
+run.bat --record --record-frames 300     上限を変える（0 で無制限）
+run.bat --replay --record                Kinect 無しで試す
+```
+
+書き出すのは**投影している絵ではなく高さ[mm]**です。欠測の穴埋め・平滑化・
+センサの揺れの抑えと、基準面による傾き補正まで済んでいるので、受け取る側は
+そのまま点群にできます（[pointcloud.py](src/topo_sandbox/processing/pointcloud.py)
+の `heights_from_depth` の出力そのもの）。
+
+**DEM 表示のあいだだけ**書き出します。起動後に `v` で DEM へ切り替えてください。
+また、高さの原点を砂面に合わせるため **`k` で基準面を取っておいてください。**
+基準面が無いまま録るとフレームごとの中央値が原点になり、砂を動かすたびに
+高さの原点が動きます（`meta.json` の `origin` で見分けられます）。
+
+`--record-dir` の下に `dem_YYYYmmdd_HHMMSS` ができ、その中に次が入ります。
+
+| ファイル | 中身 |
+| --- | --- |
+| `frame_000001.npy` … | 高さ[mm] (240, 320) float32。正が高い。`numpy.load` でそのまま読める |
+| `index.csv` | `frame,elapsed_s`。書けたフレームの番号と経過秒 |
+| `meta.json` | 大きさ・単位・符号・基準面・水位・取りこぼし枚数・切り取りの有無 |
+
+読み込む側の例:
+
+```python
+import json
+from pathlib import Path
+
+import numpy as np
+
+directory = Path(r"data\records\dem_20261002_093138")
+meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+
+for path in sorted(directory.glob("frame_*.npy")):
+    height_mm = np.load(path)  # (240, 320) float32、基準面からの高さ[mm]
+    ...  # x = 列、y = 行、z = height_mm で点群にする
+```
+
+- 1 枚 300KB（320×240 float32）です。30fps で約 9MB/秒、既定の上限 1800 枚で
+  約 550MB・約 60 秒ぶんになります。上限に達すると書き出しを止め、画面とコンソールに
+  知らせを出します（アプリは動き続けます）。
+- 書き込みは別スレッドで行い、**間に合わないフレームは捨てます。** 投影が砂場から
+  遅れるくらいなら録画のほうを諦める、という優先順位です。捨てた枚数は `meta.json` の
+  `dropped` に出ます。連番は詰めて振るので、ファイルの抜けではなく `index.csv` の
+  経過秒の間隔として現れます。
+- 列はセンサから見たままの向きです。投影像は左右反転しているので、投影と向きを
+  揃えたいときは列を反転してください（`meta.json` の `axes`）。
+
+#### 砂場の内側だけを録る（`--record-crop`）
+
+既定ではセンサの視野**全体**を書き出します。砂場のまわりの床は一面の窪地として、
+センサの前を横切った人は高い壁として入ります。
+
+**`--record-crop` を付けると、砂場の四隅（エリア指定）の内側だけを切り出して
+長方形へ直します。** 出てくる 320×240 がまるごと砂場になるので、受け取る側で
+切る必要がありません。
+
+- **エリアが未指定のあいだは書き出しません。** 画面とコンソールにその旨を出します。
+  視野全体のフレームが混ざると、あとからどれが砂場だけなのか見分けられなくなるためです。
+  エリアは `settings.json` に保存されるので、同じ設置なら起動時に読み込まれます。
+- 切り取ったものは**すでに投影と同じ向き**です（画面で最初にクリックした角が左上）。
+  エリアの四隅は左右反転したあとの表示像で指定するため、切り取りの時点で反転が入ります。
+- x と y は砂場の端から端までを等分したもので、**ミリメートルではありません。**
+  四隅の間隔は設営のたびに変わるため、ここで長さを決めようがないからです。
+  高さ（z）だけがミリメートルです。
+- どちらで録ったかは `meta.json` の `cropped` と `axes` に出ます。切り取りに使った
+  四隅も `crop_area_positions` に残ります。
+
+#### 録画を見る
+
+書き出した `.npy` は [scripts/view_record.py](scripts/view_record.py) で絵にして確認できます。
+Kinect も GPU も要りません。
+
+```bat
+python scripts\view_record.py                       いちばん新しい録画を再生
+python scripts\view_record.py data\records\dem_...   録画を指定して再生
+python scripts\view_record.py --mode gray           白黒（高さの階調）で見る
+python scripts\view_record.py --save out            画面を出さずに PNG へ書き出す
+```
+
+| キー | 動作 |
+| --- | --- |
+| `space` | 止める／動かす |
+| `a` / `d`（`←` / `→`） | 1 フレーム戻る／進む |
+| `g` | DEM の色分けと白黒を切り替え |
+| `t` | 等高線の重ね描きを切り替え |
+| `r` | 先頭へ戻る |
+| `s` | いま映っている絵を PNG で保存 |
+| `q` / `Esc` | 終わる |
+
+色分けは本体と同じ `overlays.terrain_color` を呼んでいるので、投影で見ていたものと
+そのまま見比べられます。`index.csv` の経過秒どおりに再生するため、録画時に
+取りこぼしがあればそこで間が空きます。既定は投影と同じ向き（左右反転後）で、
+`--sensor` を付けると `.npy` に入っているままの並びになります。
+`--record-crop` で録ったものはすでに投影と同じ向きなので反転しません（`--sensor` も効きません）。
 
 ### 彩色アルゴリズム（COLORING モード）
 
@@ -398,10 +509,7 @@ Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\D
 
 ## ライセンス
 
-[MIT License](LICENSE) — Copyright (c) 2026 ICONYAMATO Co., Ltd.
-
-依存パッケージ（numpy / OpenCV / Open3D / Pillow / CuPy / pythonnet）はいずれも
-このリポジトリには同梱しておらず、実行時に import するだけです。
+[MIT License](LICENSE)
 
 **Kinect for Windows SDK 1.8 は本リポジトリには含まれません。** 利用者が各自で
 インストールし、`Microsoft.Kinect.dll` を SDK のインストール先から読み込みます

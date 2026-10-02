@@ -565,3 +565,6 @@ FodyWeavers.xsd
 
 # 現場で合わせた値（機材ごとに違うので追跡しない）
 /settings.json
+
+# DEM の録画（--record）。テスト入力なので追跡しない
+/data/records/
