@@ -12,8 +12,7 @@ AI コーディングエージェント向けの作業ガイドです。プロ�
 - **既存のキーバインドと起動手順を変えない。** 作者は現場での手順を体で覚えています。やむを得ず変える場合は必ず明示し、[README.md](README.md) のキーバインド表と「イベント当日の手順」も同時に更新してください。
 - **見た目に関わる値（配色テーブル、DEM の標高帯・水位・火山・川のしきい値、解像度）を勝手に「改善」しない。** 標高の色分けや水位は、地理の教材としての意図がある表現です。火山は、高く盛るという目標を子どもに与えるためのものです。
 - 一見「未完成」に見える箇所（`c` キーの無効化など）は、誤操作防止のための意図的な措置である可能性があります。消す前に確認してください。
-
-**予備機はありません。** 旧本番機は故障により破棄され、現在の開発マシンがそのまま本番機を兼ねています。環境を壊すと代替手段がありません。
+- **実行環境（conda env、`CUDA_PATH`、ドライバや OS のセキュリティ設定）を勝手に変えない。** 実演に使うマシンでそのまま開発していることがあります。変更が要るときは先にユーザーへ確認してください。
 
 ## このリポジトリの要点
 
@@ -39,16 +38,17 @@ src/topo_sandbox/
 
 ## 実行・検証の方法
 
-### 実行環境（2026-09-18 時点で構築・動作確認済み）
+### 動作確認済みの構成
 
 | 項目 | 値 |
 | --- | --- |
-| conda env（本番） | `ar_sandbox` — イベント直前は触らないこと |
-| conda env（実験） | `ar_sandbox_dev` — 検証はこちらで行う |
-| Python | 3.9.23（miniforge / `%USERPROFILE%\.conda\envs\...`） |
+| conda env | `ar_sandbox`（`run.bat` がこの名前で有効化する） |
+| Python | 3.9.23（miniforge） |
 | 主要パッケージ | numpy 1.23.1 / open3d 0.15.1 / opencv 4.11.0 / cupy-cuda12x 13.6.0 / pythonnet 3.0.5 |
 | GPU | RTX 5070 Laptop (sm_120) + CUDA 12.8 |
 | Kinect | SDK v1.8、実機接続・フレーム取得確認済み |
+
+実演に使う `ar_sandbox` でパッケージを入れ替えて試さないでください。検証には別の env を作って使います。
 
 ### 起動
 
@@ -223,20 +223,20 @@ scripts\run.bat             実機で最終確認
 ## 変更してはいけない / 注意が必要なもの
 
 - `palette.py` の配色テーブル。教材としての見た目を決めています。
-- `data/test_frames/` の画像。再生モードの入力です。
+- `data/test_frames/` の画像。再生モードの入力です（リポジトリには含めていません。`scripts/capture_frames.py` で撮ります）。
 - `scripts/run.bat` の文字コード（Shift-JIS + CRLF）。UTF-8 にすると cmd が解釈できず起動に失敗します。
 
 ## 環境に関する既知の問題
 
-- **`CUDA_PATH` はマシン既定で CUDA 11.8 を指しています。** `cupy-cuda12x` は 12.x を要求するため、
+- **`CUDA_PATH` が CUDA 11.x を指したままの環境があります。** `cupy-cuda12x` は 12.x を要求するため、
   `run.bat` が起動時に v12.8 へ上書きしています。グローバルに変更すると CUDA 11.x を前提にした
-  他プロジェクト（`src/coloringtools_cuda` など）に影響するため、ランチャ内に閉じています。
+  他のプロジェクトに影響するため、ランチャ内に閉じています。
 - **Kinect ドライバは HVCI（メモリ整合性）非対応です。** OS 側でメモリ整合性が有効になると
   デバイスがコード 39 で停止し、アプリが起動しなくなります。
   Windows Update やポリシー変更で再有効化された場合は真っ先にここを疑ってください。
-- miniforge が `C:\ProgramData\miniforge3`（読み取り専用）にあるため、env とパッケージキャッシュを
-  `%USERPROFILE%\.conda` へ向ける `.condarc` を設定済みです。env 作成時に `condabin\*.bat` への
-  書き込みエラーが出ますが無害です。
-- このワークツリーは別ユーザー所有のため、`git log` などが `detected dubious ownership` で失敗します。
-  `git -c safe.directory=D:/AR_Sandbox/src/AR_Sandbox_PCD <command>` で回避できます。
+- miniforge を `C:\ProgramData\miniforge3`（一般ユーザーには読み取り専用）に入れた環境では、
+  env とパッケージキャッシュを `%USERPROFILE%\.conda` へ向ける `.condarc` が要ります
+  （README のセットアップ手順 3）。env 作成時に `condabin\*.bat` への書き込みエラーが出ますが無害です。
+- ワークツリーが別ユーザーの所有だと、`git log` などが `detected dubious ownership` で失敗します。
+  `git -c safe.directory=<ワークツリーのパス> <command>` で回避できます。
   グローバル設定を変更する場合はユーザーに確認してください（勝手に実行しないこと）。
