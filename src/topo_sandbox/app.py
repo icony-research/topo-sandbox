@@ -20,6 +20,7 @@ from .renderer import (
     RenderSettings,
     ViewMode,
     sensor_area_from_view,
+    sensor_point_from_screen,
 )
 
 
@@ -54,6 +55,9 @@ class SandboxApp:
         #: 投影枠の編集モードと、選択中の角
         self._projector_edit = False
         self._projector_corner = 0
+
+        #: 水源の置き場所を決めているところか。このあいだのクリックは水源になる。
+        self._spring_edit = False
 
         self._fullscreen = False
         self._geometry = None
@@ -218,6 +222,10 @@ class SandboxApp:
     # 投影エリアの指定
     # ------------------------------------------------------------------
     def _on_click(self, event):
+        if self._spring_edit:
+            self._place_spring(event.x, event.y)
+            return
+
         positions = self.settings.area_positions
         if len(positions) == 4:
             self._show_message("これ以上は追加できません。変更する場合は一度クリアしてください。")
@@ -340,6 +348,14 @@ class SandboxApp:
             self._adjust_water_level(-config.WATER_LEVEL_DELTA_MM)
         elif key == "N":
             self._reset_water_level()
+        elif key == "w":
+            self._toggle_flood()
+        elif key == "W":
+            self._drain_flood()
+        elif key == "o":
+            self._toggle_heavy_rain()
+        elif key == "i":
+            self._toggle_spring_edit()
         # 方向キーは、投影枠の編集中なら選択中の角を 1 画素ずつ動かす。
         # そうでなければエリア全体の平行移動。
         # 左キーで座標を + する（＝画面上では右へ動く）のは元からの挙動。
@@ -423,12 +439,86 @@ class SandboxApp:
         self._show_message(message)
 
     # ------------------------------------------------------------------
+    # 水源から流れる水（堤防の決壊）
+    # ------------------------------------------------------------------
+    def _flood_hint(self):
+        """水が見えない理由があれば、それを案内する文を返す。
+
+        条件がそろっていないと何も起きないので、押しても壊れているように見える。
+        """
+        if self.settings.view_mode is not ViewMode.DEM:
+            return "（DEM 表示で見えます。v で切り替え）"
+        if self.settings.reference_plane is None:
+            return "（基準面が要ります。k を押してください）"
+        if self.settings.spring_position is None:
+            return "（水源がありません。i を押して砂場をクリック）"
+        return ""
+
+    def _toggle_flood(self):
+        self.settings.show_flood = not self.settings.show_flood
+        if self.settings.show_flood:
+            message = "水を流す: 開始" + self._flood_hint()
+        else:
+            # 切ると水は抜ける（Renderer が持ち越さない）。
+            message = "水を流す: 停止（水は抜けます）"
+        self._show_message(message)
+
+    def _drain_flood(self):
+        """水を抜いて、空の砂場からやり直す（Shift + W）。"""
+        self.renderer.drain_flood()
+        self._show_message("水を抜きました")
+
+    def _toggle_heavy_rain(self):
+        self.settings.heavy_rain = not self.settings.heavy_rain
+        if self.settings.heavy_rain:
+            message = f"大雨: 水源の水が {config.FLOOD_RAIN_FACTOR:g} 倍になります"
+        else:
+            message = "大雨: やみました"
+        if not self.settings.show_flood:
+            message += "（w で水を流す）"
+        else:
+            message += self._flood_hint()
+        self._show_message(message)
+
+    def _toggle_spring_edit(self):
+        """水源の置き場所モードを出入りする。
+
+        クリックはふだんエリアの四隅に使っているので、モードを分ける。
+        1 回置いたら自動で抜ける。そのまま次のクリックでエリアの点を
+        足してしまわないため（四隅がそろっていれば足されないが、念のため）。
+        """
+        self._spring_edit = not self._spring_edit
+        if self._spring_edit:
+            self._show_message(
+                "水源の置き場所: 投影された砂場の上流をクリック（i で取り消し）",
+                duration=200,
+            )
+        else:
+            self._show_message("水源の置き場所: 取り消しました")
+
+    def _place_spring(self, x, y):
+        position = sensor_point_from_screen((x, y), self.settings)
+        if position is None:
+            # モードは抜けない。もう一度クリックすれば置ける。
+            self._show_message("砂場の外です。もう一度クリックしてください（i で取り消し）")
+            return
+
+        self.settings.spring_position = position
+        self._spring_edit = False
+        message = "水源を置きました"
+        if not self.settings.show_flood:
+            message += "（w で水を流す）"
+        else:
+            message += self._flood_hint()
+        self._show_message(message)
+
+    # ------------------------------------------------------------------
     # 設定の保存と読み込み
     # ------------------------------------------------------------------
     def _save_settings(self, _event=None):
         """いまの設定を保存する（Ctrl + S）。
 
-        次の設営で読み込めば、エリア・投影枠・Z スケール・カラー感度・水位・
+        次の設営で読み込めば、エリア・投影枠・水源・Z スケール・カラー感度・水位・
         基準面を合わせ直さずに済む。
         """
         try:
@@ -444,7 +534,7 @@ class SandboxApp:
         """調整値を初期値へ戻す（Ctrl + R）。設営ぶんは残す。"""
         self.settings.reset_adjustments()
         self._show_message(
-            "調整値を初期値へ戻しました（エリア・投影枠・基準面はそのまま）",
+            "調整値を初期値へ戻しました（エリア・投影枠・基準面・水源はそのまま）",
             duration=200,
         )
         return "break"
@@ -454,6 +544,7 @@ class SandboxApp:
         self.settings.reset_all()
         self._projector_corner = 0
         self._projector_edit = False
+        self._spring_edit = False
         self._show_message(
             "すべて初期値へ戻しました。エリアを 4 点クリックし、k で基準面を取り直してください"
             f"（{config.SETTINGS_PATH.name} を書き換えるには Ctrl + S）",

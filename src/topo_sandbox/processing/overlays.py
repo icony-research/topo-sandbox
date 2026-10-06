@@ -367,6 +367,33 @@ def terrain_color(height_mm, elapsed_s=0.0, water_level_mm=None):
     return np.clip(color, 0, 255).astype(np.uint8)
 
 
+def draw_flood(canvas, depth_mm, elapsed_s=0.0):
+    """水源から流れた水（:mod:`.flood`）を描き込む。
+
+    見た目は海や湖の水面と同じにする。川が海へ注いだところで色や光り方が
+    変わると、別のものに見えてしまう。:func:`_water_color` は「水位からの深さ」で
+    色を決めるので、水位 0・高さ -水深 として渡せば水深そのものが深さになる。
+
+    :func:`draw_rivers` と同じく canvas を直接書き換え、水のある画素だけで計算する。
+
+    Args:
+        canvas: 描き込み先の RGB 画像 (H, W, 3) uint8。
+        depth_mm: 見せる水深[mm] (H, W)。0 のところは描かない。
+        elapsed_s: 表示を始めてからの経過秒。さざ波を進めるのに使う。
+
+    Returns:
+        水を重ねた RGB 画像 (H, W, 3) uint8。
+    """
+    wet = depth_mm > 0.0
+    if not wet.any():
+        return canvas
+
+    rows, columns = np.nonzero(wet)
+    color = _water_color(-depth_mm[wet], rows, columns, elapsed_s, 0.0)
+    canvas[wet] = np.clip(color, 0, 255).astype(np.uint8)
+    return canvas
+
+
 def edge_lines(coloring_image):
     """彩色画像から、傾斜が変化する帯だけを抜き出す（エッジ表示）。
 

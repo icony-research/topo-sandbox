@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 from . import config
-from .processing import coloring, depth, overlays, pointcloud, rivers
+from .processing import coloring, depth, flood, overlays, pointcloud, rivers
 from .recorder import frame_context
 
 
@@ -64,6 +64,49 @@ def sensor_area_from_view(positions):
     """
     width, height = config.VIEW_SIZE
     return [[1.0 - x / width, y / height] for x, y in positions]
+
+
+def sensor_point_from_screen(point, settings):
+    """画面でクリックした 1 点を、センサ画像の正規化座標へ戻す。
+
+    水源の位置を決めるのに使う。射影変換モードでは画面に映っているのは
+    四隅を引き伸ばしたあとの像なので、まず変換を逆にたどって表示像の座標へ
+    戻し、そこから :func:`sensor_area_from_view` と同じく左右反転を戻す。
+    エリアの四隅と違って**投影された砂場そのもの**をクリックするため、
+    モードによらず指した場所に水源が置かれる。
+
+    Args:
+        point: 画面上の (x, y)（:data:`config.VIEW_SIZE` の画素）。
+        settings: :class:`RenderSettings`。
+
+    Returns:
+        正規化座標 (u, v)。画面の外や、砂場として写っていない所なら None。
+    """
+    x, y = float(point[0]), float(point[1])
+
+    area = np.asarray(settings.area_positions, dtype=np.float32)
+    # 四隅が潰れていると cv2 は例外を出さずに意味の無い行列を返し、
+    # 水源がでたらめな所に置かれる。そのときは変換しない。
+    if (
+        settings.mapping_mode is MappingMode.PERSPECTIVE
+        and settings.has_area
+        and cv2.contourArea(area) >= _MIN_CROP_AREA_PX
+    ):
+        try:
+            # 行き先と元を入れ替えれば逆向きの変換になる。
+            matrix = cv2.getPerspectiveTransform(
+                np.asarray(settings.projector_positions, dtype=np.float32), area
+            )
+        except cv2.error:
+            pass
+        else:
+            x, y = cv2.perspectiveTransform(np.array([[[x, y]]], dtype=np.float32), matrix)[0][0]
+
+    ((u, v),) = sensor_area_from_view([[x, y]])
+    # 範囲の比較は NaN でも偽になるので、投影枠が潰れていて変換が壊れても弾ける。
+    if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+        return None
+    return [float(u), float(v)]
 
 
 #: 砂場の四隅がこれより狭い面積しか囲んでいなければ、切り取らない[画素^2]。
@@ -131,7 +174,7 @@ class MappingMode(enum.Enum):
 
 
 #: :meth:`RenderSettings.reset_adjustments` が初期値へ戻す項目。
-#: 設営ぶん（area_positions / projector_positions / reference_plane）は含めない。
+#: 設営ぶん（area_positions / projector_positions / reference_plane / spring_position）は含めない。
 _ADJUSTMENT_FIELDS = (
     "view_mode",
     "mapping_mode",
@@ -141,6 +184,8 @@ _ADJUSTMENT_FIELDS = (
     "show_rivers",
     "river_preset",
     "water_level_mm",
+    "show_flood",
+    "heavy_rain",
 )
 
 
@@ -159,6 +204,13 @@ class RenderSettings:
     river_preset: int = config.RIVER_PRESET_INITIAL
     #: 水面の高さ[mm]。n / m キーで上下し、Shift + N で初期値へ戻す。
     water_level_mm: float = config.WATER_LEVEL_MM
+    #: 水源から水を流すか。w キーで切り替える。
+    show_flood: bool = False
+    #: 大雨か（水源の量が増える）。o キーで切り替える。
+    heavy_rain: bool = False
+    #: 水源の位置。センサ画像の正規化座標 [u, v]。i キーのあと砂場をクリックして決める。
+    #: 設営ぶんなので Ctrl + R では消えない。
+    spring_position: list = None
     #: センサ側の砂場の四隅。左上から反時計回りに 4 点。
     area_positions: list = field(default_factory=list)
     #: 投影像のどこが砂場かを表す四隅。既定は画面全体。
@@ -193,7 +245,7 @@ class RenderSettings:
     def reset_adjustments(self):
         """実演中に触る調整値だけを初期値へ戻す。
 
-        設営ぶん（エリアの四隅・投影枠・基準面）は残す。合わせ直すのに
+        設営ぶん（エリアの四隅・投影枠・基準面・水源）は残す。合わせ直すのに
         時間が掛かるうえ、実演の最中に消えると立て直せないため。
         """
         defaults = RenderSettings()
@@ -207,6 +259,7 @@ class RenderSettings:
         """
         self.reset_adjustments()
         self.area_positions = []
+        self.spring_position = None
         self.projector_positions = default_projector_quad()
         self.reference_plane = None
 
@@ -239,9 +292,20 @@ class Renderer:
         self._stabilizer = depth.TemporalStabilizer()
         self._contours = overlays.ContourBands()
 
+        # 水源から流れた水。これも前のフレームの水深を覚えている。
+        self._flood = flood.FloodSimulator()
+
     def _elapsed(self):
         """表示を始めてからの経過秒。"""
         return self._clock() - self._started_at
+
+    def drain_flood(self):
+        """水源から流れた水をすべて抜く（W キー）。
+
+        メインスレッドから呼ばれる。ワーカが計算している最中に配列を
+        消さないよう、次のフレームの頭で抜く。
+        """
+        self._flood.request_reset()
 
     def close(self):
         """抱えているものを片付ける。録画中なら書き残しを書き切る。
@@ -279,6 +343,11 @@ class Renderer:
         display = depth.to_display(-height_mm)
 
         mode = settings.view_mode
+        if not self._flood_active(settings):
+            # 見えていないあいだは水を持ち越さない。DEM へ戻ったとき、
+            # 砂場を作り変えたあとの地形に前の水が残っていると不自然になる。
+            self._flood.reset()
+
         if mode is ViewMode.COLORING:
             return self._render_coloring(height_mm, settings)
         if mode is ViewMode.DEM:
@@ -363,6 +432,19 @@ class Renderer:
             colored = self._draw_contours(height_mm, colored, settings)
         return colored
 
+    @staticmethod
+    def _flood_active(settings):
+        """水源の水を流すか。
+
+        DEM 表示で基準面があるときだけ。基準面が無いと高さの原点がフレームごとに
+        動き、水が揺すられて勝手に流れ出す（水位を出さないのと同じ理由）。
+        """
+        return (
+            settings.show_flood
+            and settings.view_mode is ViewMode.DEM
+            and settings.reference_plane is not None
+        )
+
     def _render_dem(self, height_mm, display, settings):
         # 点群表示アプリのテスト入力として書き出す（--record のときだけ）。
         # 描く前に積むのは、重いフレームの描画を待って書き出しが遅れないようにするため。
@@ -388,10 +470,14 @@ class Renderer:
                 )
                 dem = overlays.draw_rivers(dem, strength)
         else:
-            terrain = overlays.terrain_color(height_mm, self._elapsed(), settings.water_level_mm)
+            elapsed = self._elapsed()
+            terrain = overlays.terrain_color(height_mm, elapsed, settings.water_level_mm)
 
             dry = height_mm >= settings.water_level_mm
-            if settings.show_rivers and dry.any():
+            # 水源の水を流しているあいだは、雨の筋（D8）は描かない。「雨が降ったら
+            # どこを流れるか」と「いま流れている水」が重なると、どちらが本物の
+            # 水か見分けられない。
+            if settings.show_rivers and not settings.show_flood and dry.any():
                 # 水面より下の川は描かない。湖や海に入った川は見えなくなる。
                 # 全部沈んでいるなら流量の計算そのものが要らない。
                 _, min_cells, full_cells = settings.river_setting
@@ -401,6 +487,23 @@ class Renderer:
                 # 川は拡大する前に混ぜる。投影解像度で混ぜると触る画素が
                 # 6 倍になり、それだけで 1 フレームの予算の半分を使う。
                 terrain = overlays.draw_rivers(terrain, strength)
+
+            if self._flood_active(settings):
+                # 海へ流れ込んだ水はそこで消える。砂場の外へ出た水も消す
+                # （エリアは左右反転後の座標なので、センサ側へ戻して渡す）。
+                area = None
+                if settings.has_area:
+                    area = sensor_area_from_view(settings.area_positions)
+                water = self._flood.update(
+                    height_mm,
+                    elapsed,
+                    spring_uv=settings.spring_position,
+                    heavy_rain=settings.heavy_rain,
+                    sea_level_mm=settings.water_level_mm,
+                    area_uv=area,
+                )
+                # 川と同じく、拡大する前に混ぜる。
+                terrain = overlays.draw_flood(terrain, water, elapsed)
 
             dem = self._to_projection(terrain, settings)
 

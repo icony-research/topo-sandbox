@@ -30,7 +30,7 @@ src/topo_sandbox/
   sensor/          base.py の DepthSource を kinect.py と replay.py が実装
   processing/      depth（欠測の穴埋めと表示階調）/ plane（基準面と傾き補正）/
                    pointcloud / coloring（GPU）/ rivers（流向と流量）/
-                   overlays（地形・陰影・等高線、CPU のみ）
+                   flood（水源から流れる水）/ overlays（地形・陰影・等高線、CPU のみ）
 ```
 
 **まず [renderer.py](src/topo_sandbox/renderer.py) を読んでください。** 表示モードごとの処理順序が
@@ -166,6 +166,23 @@ scripts\run.bat             実機で最終確認
   自分を指します。これを流入に含めると自分の量を自分に足し続けて発散し、画面が壊れます。
   `flow_accumulation` が `directions != index` で除いています。
   tests/test_rivers.py の `test_窪地があっても発散しない` で固定しています。
+- **水源の水（`processing/flood.py`、`w` キー）は川（D8）とは別物です。** D8 は毎フレーム
+  数え直すだけで水の量を持たないため、堤防を越える・切れ目から溢れるが出せません。
+  `FloodSimulator` はマスごとの水深を持ち続け、水面の高さの差で隣へ流します（仮想パイプ法）。
+  前のフレームの水を持つので `Renderer` が 1 つ抱え、DEM 表示で基準面があるときだけ動かし、
+  それ以外のフレームでは水を捨てます（基準面が無いと高さの原点が動いて水が揺すられる）。
+  時間はさざ波と同じく時計で進め、刻み（`FLOOD_STEP_S`）は固定、1 フレームで進める上限
+  （`FLOOD_MAX_FRAME_S`）を超えたぶんは捨てます。刻みをフレームの間隔に合わせると、
+  詰まったフレームほど刻みが粗くなって発散します。
+  **流れの勢いには水深を掛けてあります（`FLOOD_GRAVITY`）。** 掛けないと斜面の水が 0.1mm の
+  膜に広がって見えなくなり、決壊口から水が出ていても描けませんでした。掛ける水深には
+  上限（`FLOOD_DEPTH_CAP_MM`）があり、外すと深い水が振動して 200mm の水柱が 390mm まで
+  跳ねます。持っている以上の水を出さないよう流れを縮める処理も、外すと水深が負になって
+  発散します。`W`（水を抜く）はメインスレッドから来るので `request_reset` で印だけ付け、
+  ワーカ側で抜きます。水源の位置はセンサ画像の正規化座標で持ち、画面のクリックからは
+  `renderer.sensor_point_from_screen` で射影変換と左右反転を戻して求めます。
+  tests/test_flood.py で固定しています。
+
 - **射影変換は「センサ側の四隅」と「投影側の四隅」の 2 つで決まります。**
   投影側を画面全体に固定すると、プロジェクタを物理的に正確へ据える必要が出ます。
   `RenderSettings.projector_positions` を既定値のままにすると従来と同じ挙動です。

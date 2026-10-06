@@ -13,6 +13,7 @@ from topo_sandbox.renderer import (
     ViewMode,
     default_projector_quad,
     sensor_area_from_view,
+    sensor_point_from_screen,
 )
 
 
@@ -205,6 +206,9 @@ class TestReset:
             area_positions=[[1, 2], [3, 4], [5, 6], [7, 8]],
             projector_positions=[[9, 9], [9, 90], [90, 90], [90, 9]],
             reference_plane=plane,
+            show_flood=True,
+            heavy_rain=True,
+            spring_position=[0.2, 0.3],
         )
 
     def test_調整値だけ戻す(self):
@@ -219,11 +223,12 @@ class TestReset:
         assert settings.view_mode is defaults.view_mode
         assert settings.mapping_mode is defaults.mapping_mode
         assert not settings.show_contour and not settings.show_rivers
+        assert not settings.show_flood and not settings.heavy_rain
 
     def test_設営は残す(self):
         """合わせ直すのに時間が掛かる。実演中に消えると立て直せない。"""
         settings = self._adjusted()
-        setup = ("area_positions", "projector_positions", "reference_plane")
+        setup = ("area_positions", "projector_positions", "reference_plane", "spring_position")
         before = {name: getattr(settings, name) for name in setup}
 
         settings.reset_adjustments()
@@ -237,6 +242,7 @@ class TestReset:
         assert settings.area_positions == []
         assert settings.projector_positions == default_projector_quad()
         assert settings.reference_plane is None
+        assert settings.spring_position is None
         assert settings.z_scale == RenderSettings().z_scale
 
 
@@ -353,3 +359,117 @@ class TestRivers:
         with_rivers = renderer.render(frame, _settings(view_mode=ViewMode.DEM, show_rivers=True))
 
         assert (without != with_rivers).any()
+
+
+class TestSensorPointFromScreen:
+    """水源を置くためのクリック位置の変換。"""
+
+    def test_左右反転を戻す(self):
+        width, height = config.VIEW_SIZE
+        point = sensor_point_from_screen((width // 4, height // 2), _settings())
+        assert point == pytest.approx([0.75, 0.5])
+
+    def test_射影変換モードでは変換を逆にたどる(self):
+        """画面に映っているのは引き伸ばしたあとの像。投影枠の角をクリックすると
+        エリアの角を指したことになる。"""
+        width, height = config.VIEW_SIZE
+        area = [[200, 150], [200, 450], [600, 450], [600, 150]]
+        settings = _settings(mapping_mode=MappingMode.PERSPECTIVE, area_positions=area)
+
+        point = sensor_point_from_screen((0, 0), settings)
+
+        assert point == pytest.approx([1.0 - 200 / width, 150 / height], abs=1e-4)
+
+    def test_エリアがそろっていなければ変換しない(self):
+        settings = _settings(mapping_mode=MappingMode.PERSPECTIVE, area_positions=[[1, 2]])
+        width, height = config.VIEW_SIZE
+        assert sensor_point_from_screen((0, 0), settings) == pytest.approx([1.0, 0.0])
+
+    def test_砂場の外ならNone(self):
+        area = [[200, 150], [200, 450], [600, 450], [600, 150]]
+        settings = _settings(mapping_mode=MappingMode.PERSPECTIVE, area_positions=area)
+        # 投影枠を画面の中央だけにすると、画面の隅は砂場の外になる
+        settings.projector_positions = [[300, 200], [300, 400], [500, 400], [500, 200]]
+
+        assert sensor_point_from_screen((0, 0), settings) is None
+
+    def test_四隅が潰れていても落ちない(self):
+        settings = _settings(mapping_mode=MappingMode.PERSPECTIVE, area_positions=[[100, 100]] * 4)
+        assert sensor_point_from_screen((400, 300), settings) == pytest.approx([0.5, 0.5])
+
+
+def _flood_settings(**overrides):
+    """中央の窪みに水源を置いた DEM 設定。海は窪みより低くしておく。"""
+    overrides.setdefault("show_flood", True)
+    overrides.setdefault("spring_position", [0.5, 0.5])
+    overrides.setdefault("water_level_mm", config.WATER_LEVEL_MIN_MM)
+    return _dem_settings(**overrides)
+
+
+class TestFlood:
+    def _render_for(self, renderer, clock, settings, seconds):
+        frame = _frame_with_pool()
+        image = None
+        for _ in range(int(seconds * 30)):
+            clock.advance(1.0 / 30.0)
+            image = renderer.render(frame, settings)
+        return image
+
+    def test_水源から水が流れると見た目が変わる(self):
+        clock = _FakeClock()
+        renderer = Renderer(clock=clock)
+        dry = renderer.render(_frame_with_pool(), _flood_settings(show_flood=False))
+
+        wet = self._render_for(renderer, clock, _flood_settings(), 2.0)
+
+        assert (dry != wet).any()
+        assert renderer._flood.water.sum() > 0.0
+
+    def test_切ると水が抜ける(self):
+        """見えないあいだに水を持ち越さない。"""
+        clock = _FakeClock()
+        renderer = Renderer(clock=clock)
+        self._render_for(renderer, clock, _flood_settings(), 1.0)
+
+        renderer.render(_frame_with_pool(), _flood_settings(show_flood=False))
+
+        assert renderer._flood.water is None
+
+    def test_DEM以外では流さない(self):
+        clock = _FakeClock()
+        renderer = Renderer(clock=clock)
+        self._render_for(renderer, clock, _flood_settings(), 1.0)
+
+        settings = _flood_settings()
+        settings.view_mode = ViewMode.DEPTH
+        renderer.render(_frame_with_pool(), settings)
+
+        assert renderer._flood.water is None
+
+    def test_基準面が無ければ流さない(self):
+        """高さの原点がフレームごとに動き、水が揺すられて勝手に流れ出すため。"""
+        clock = _FakeClock()
+        renderer = Renderer(clock=clock)
+        settings = _settings(view_mode=ViewMode.DEM, show_flood=True, spring_position=[0.5, 0.5])
+
+        self._render_for(renderer, clock, settings, 1.0)
+
+        assert renderer._flood.water is None
+
+    def test_水を抜くと次のフレームで空になる(self):
+        clock = _FakeClock()
+        renderer = Renderer(clock=clock)
+        self._render_for(renderer, clock, _flood_settings(), 1.0)
+
+        renderer.drain_flood()
+        renderer.render(_frame_with_pool(), _flood_settings())
+
+        assert renderer._flood.water.sum() == 0.0
+
+    def test_水を流しているあいだは雨の筋を描かない(self):
+        """D8 の筋と本物の水が重なると、どちらが水か見分けられない。"""
+        frame = _frame_with_pool()
+        without = Renderer(clock=lambda: 0.0).render(frame, _flood_settings())
+        with_rivers = Renderer(clock=lambda: 0.0).render(frame, _flood_settings(show_rivers=True))
+
+        np.testing.assert_array_equal(without, with_rivers)
