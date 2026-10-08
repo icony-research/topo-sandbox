@@ -125,6 +125,7 @@ class SandboxApp:
         self._draw_latest()
         self._draw_projector_frame()
         self._check_recorder()
+        self._check_streamer()
         self._draw_message()
         self._after_job_id = self.window.after(config.FRAME_INTERVAL_MS, self._tick)
 
@@ -165,6 +166,22 @@ class SandboxApp:
         if notice is not None:
             print(notice)
             self._show_message(notice, duration=200)
+
+    def _check_streamer(self):
+        """ライブ配信がつながった・切れたことを画面とコンソールで知らせる。
+
+        配信も別スレッドで動き、切れても黙ってつなぎ直し続ける（実演を止めない
+        ため）。状態が変わったときだけ知らせが積まれるので、ここで拾って出す。
+        投影像の上に出るので、録画の知らせより短く既定の長さで消す。
+        """
+        streamer = self.renderer.streamer
+        if streamer is None:
+            return
+
+        notice = streamer.take_notice()
+        if notice is not None:
+            print(notice)
+            self._show_message(notice)
 
     def _recording_note(self):
         """表示モードを切り替えたときに足す、録画の状況。

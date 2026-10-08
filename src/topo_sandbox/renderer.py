@@ -214,7 +214,7 @@ class RenderSettings:
 class Renderer:
     """深度フレームから投影用の画像を作る。"""
 
-    def __init__(self, clock=time.monotonic, recorder=None, record_crop=False):
+    def __init__(self, clock=time.monotonic, recorder=None, record_crop=False, streamer=None):
         """
         Args:
             clock: 秒を返す関数。水面のさざ波を進めるのに使う。
@@ -223,6 +223,9 @@ class Renderer:
                 `--record` で起動したときだけ渡され、普段は None。
             record_crop: 書き出すときに砂場の四隅の内側だけを切り出すか
                 （`--record-crop`）。
+            streamer: :class:`~topo_sandbox.streamer.DemStreamer`。
+                与えると高さ[mm]をライブ表示アプリへ送る。
+                `--stream` で起動したときだけ渡され、普段は None。
 
         さざ波をフレーム数ではなく時計で進めるのは、負荷で処理が間に合わない
         フレームを `app._tick` が捨てるため。フレーム数で数えると、混雑した
@@ -232,6 +235,7 @@ class Renderer:
         self._started_at = clock()
         self.recorder = recorder
         self.record_crop = record_crop
+        self.streamer = streamer
 
         # どちらも前のフレームを覚えている。センサの揺れで等高線や標高帯の
         # 境目が踊るのを抑えるため。`app._tick` がワーカを 1 つしか走らせない
@@ -246,10 +250,12 @@ class Renderer:
     def close(self):
         """抱えているものを片付ける。録画中なら書き残しを書き切る。
 
-        `app._on_close` から呼ばれる。録画していなければ何もしない。
+        `app._on_close` から呼ばれる。録画も配信もしていなければ何もしない。
         """
         if self.recorder is not None:
             self.recorder.close()
+        if self.streamer is not None:
+            self.streamer.close()
 
     # ------------------------------------------------------------------
     def render(self, depth_frame, settings):
@@ -273,6 +279,12 @@ class Renderer:
 
         # 基準面からの高さ[mm]。基準面があればセンサの傾きも打ち消される。
         height_mm = pointcloud.heights_from_depth(depth_mm, settings.reference_plane)
+
+        # ライブ表示アプリへ送る（--stream のときだけ）。録画と違って表示モードを
+        # 問わないのは、実演中に v で切り替えるたびに別画面の地形が止まると困るため。
+        # 描く前に渡すのは、重いフレームの描画を待って送るのが遅れないようにするため。
+        if self.streamer is not None:
+            self._stream(height_mm, settings)
 
         # 画面に出す深度・DEM・等高線は 8bit の階調を使う。
         # 高さの符号を反転して「大きいほど低い」に揃える。
@@ -438,6 +450,33 @@ class Renderer:
             frame,
             self._elapsed(),
             frame_context(settings.reference_plane, settings.water_level_mm, area),
+        )
+
+    def _stream(self, height_mm, settings):
+        """ライブ表示アプリへ高さ[mm]を 1 枚渡す。
+
+        砂場の四隅が決まっていれば内側だけを切り取って送る。決まっていなければ
+        視野全体を送る。録画（`--record-crop`）と違って断らないのは、ライブ表示は
+        あとから見分ける必要が無く、設営の途中でも砂場が映っているほうが
+        確かめやすいため。どちらで送ったかはヘッダの ``cropped`` で分かる。
+
+        どちらも**投影像と同じ向き**（左右反転後）に揃える。切り取ったものは
+        `crop_to_area` が反転済みなので、視野全体のときだけここで反転する。
+        揃えないと、四隅を指定した瞬間にライブ表示の地形が左右に裏返る。
+        """
+        frame = None
+        if settings.has_area:
+            frame = crop_to_area(height_mm, settings.area_positions)
+
+        cropped = frame is not None
+        if not cropped:
+            frame = height_mm[:, ::-1]
+
+        self.streamer.send(
+            frame,
+            cropped=cropped,
+            reference=settings.reference_plane is not None,
+            water_level_mm=settings.water_level_mm,
         )
 
     def _render_depth(self, height_mm, display, settings):

@@ -22,6 +22,10 @@ cupy-cuda12x==13.6.0
 # Kinect SDK 1.8 の Microsoft.Kinect.dll を Python から利用するために使用する
 pythonnet==3.0.5
 
+# --stream（ライブ表示アプリへの配信）で使う WebSocket クライアント。純 Python。
+# 2026-10-07 時点で ar_sandbox / ar_sandbox_dev のどちらにも既に入っていた版に合わせている。
+websocket-client==1.9.0
+
 # 開発用
 pytest==8.4.2
 ruff

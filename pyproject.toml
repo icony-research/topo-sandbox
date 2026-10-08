@@ -22,6 +22,8 @@ dependencies = [
 [project.optional-dependencies]
 # Kinect の実機を使う場合のみ必要
 kinect = ["pythonnet"]
+# ライブ表示アプリへ配信する（--stream）場合のみ必要
+stream = ["websocket-client"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]

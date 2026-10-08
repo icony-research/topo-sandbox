@@ -6,12 +6,16 @@ python -m topo_sandbox --replay     保存画像で起動（Kinect 不要）
 python -m topo_sandbox --bench      フレーム取得性能の実測（GUI 無し）
 python -m topo_sandbox --record     DEM の高さ[mm]を連番ファイルへ書き出す
 python -m topo_sandbox --record --record-crop   砂場の内側だけを切り出して書き出す
+python -m topo_sandbox --stream     DEM の高さ[mm]をライブ表示アプリへ送る
+python -m topo_sandbox --stream ws://192.168.0.10:8000/ws/ingest   送り先を指定する
 
 ``--record`` は別アプリ（点群を大型ディスプレイへ出すもの）のテスト入力を
-作るためのもので、**付けなければ何も起きない**。実演の起動手順は変わらない。
+作るためのもの、``--stream`` はその別アプリ（topo-sandbox-live）へいまの砂場を
+送るためのもので、どちらも**付けなければ何も起きない**。実演の起動手順は変わらない。
 """
 
 import argparse
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -72,6 +76,17 @@ def _build_parser():
         default=config.RECORD_MAX_FRAMES,
         help=(f"--record で書き出す上限の枚数。0 で無制限（既定: {config.RECORD_MAX_FRAMES}）"),
     )
+    parser.add_argument(
+        "--stream",
+        nargs="?",
+        const=config.STREAM_URL,
+        default=None,
+        metavar="URL",
+        help=(
+            "高さ[mm]をライブ表示アプリ（topo-sandbox-live）へ WebSocket で送る。"
+            f"URL を省略すると {config.STREAM_URL}"
+        ),
+    )
     return parser
 
 
@@ -125,6 +140,39 @@ def _make_recorder(args):
     return recorder
 
 
+def _make_streamer(args):
+    """``--stream`` のときだけ送信を始める。
+
+    送り先がまだ起動していなくても待たずに起動し、つながるまで裏で試し続ける。
+    websocket-client が入っていなければ配信を諦めるだけで、アプリは動かし続ける。
+    配信は実演の付帯物であって、これのために起動できないほうが困るため。
+
+    Returns:
+        :class:`~topo_sandbox.streamer.DemStreamer`、または None。
+    """
+    if args.stream is None:
+        return None
+
+    # 入っているかだけを先に確かめる。読み込むのは送信スレッドがつなぐとき。
+    if importlib.util.find_spec("websocket") is None:
+        print(
+            "ライブ配信を始められません（配信なしで続けます）: websocket-client がありません。"
+            " pip install -r requirements.txt を確認してください",
+            file=sys.stderr,
+        )
+        return None
+
+    from .streamer import DemStreamer
+
+    streamer = DemStreamer(url=args.stream)
+    streamer.start()
+    print(f"ライブ配信: {streamer.url}")
+    print("      表示モードを問わず、高さ[mm]を送り続けます。")
+    print("      砂場の四隅を指定すると、その内側だけを送ります。")
+    print("      高さの原点を砂面に合わせるには基準面（k）が要ります。")
+    return streamer
+
+
 def _bench(source, frames):
     """フレーム取得から 8bit 変換までの所要時間を測る。"""
     source.open()
@@ -173,7 +221,11 @@ def main(argv=None):
     from .renderer import Renderer
 
     source.open()
-    renderer = Renderer(recorder=_make_recorder(args), record_crop=args.record_crop)
+    renderer = Renderer(
+        recorder=_make_recorder(args),
+        record_crop=args.record_crop,
+        streamer=_make_streamer(args),
+    )
     SandboxApp(source, renderer=renderer).run()
     return 0
 

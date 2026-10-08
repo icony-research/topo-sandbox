@@ -26,6 +26,7 @@ TopoSandbox/
 │   ├── settings_store.py  現場で合わせた値の保存と読み込み（settings.json）
 │   ├── renderer.py        1 フレーム分の描画パイプライン
 │   ├── recorder.py        DEM の高さ[mm]の書き出し（--record。外部アプリのテスト入力用）
+│   ├── streamer.py        DEM の高さ[mm]のライブ配信（--stream。topo-sandbox-live へ送る）
 │   ├── config.py          解像度・調整値などの定数
 │   ├── palette.py         傾斜角 → 色 の変換テーブル（361 色）
 │   ├── sensor/            深度フレームの供給元
@@ -142,6 +143,7 @@ run.bat --replay     Kinect 無しで保存画像を再生（動作確認用）
 run.bat --near       Near Mode（Kinect for Windows センサのみ）
 run.bat --bench      フレーム取得性能の実測（GUI 無し）
 run.bat --record     DEM の高さを書き出す（開発用。「DEM の高さを書き出す」参照）
+run.bat --stream     砂場の高さを別画面のライブ表示へ送る（「ライブ表示アプリへ送る」参照）
 ```
 
 800×600 のウィンドウが開きます。`F11` で全画面（枠なし最大化）に切り替え、プロジェクタ側のディスプレイへ移動して使用します。
@@ -350,6 +352,43 @@ python scripts\view_record.py --save out            画面を出さずに PNG �
 取りこぼしがあればそこで間が空きます。既定は投影と同じ向き（左右反転後）で、
 `--sensor` を付けると `.npy` に入っているままの並びになります。
 `--record-crop` で録ったものはすでに投影と同じ向きなので反転しません（`--sensor` も効きません）。
+
+### ライブ表示アプリへ送る（`--stream`）
+
+砂場の起伏を、別のディスプレイに 2.5 次元の地形としてリアルタイムに映すための機能です。
+受け取る側は別リポジトリの **topo-sandbox-live**（ブラウザで表示する Three.js の地形ビューア）です。
+**`--stream` を付けなければ何も起きません。** 通常の起動手順もキーバインドも変わりません。
+
+```bat
+run.bat --stream                                       同じ PC の topo-sandbox-live へ送る
+run.bat --stream ws://192.168.0.10:8000/ws/ingest      別の PC へ送る
+run.bat --replay --stream                              Kinect 無しで試す
+```
+
+受け取る側は topo-sandbox-live を次の設定で起動しておきます（どちらを先に起動しても構いません）。
+
+```bat
+cd topo-sandbox-live\backend
+.venv\Scripts\python -m app --config configs\topo_sandbox.toml
+```
+
+- 送るのは録画と同じく**投影している絵ではなく高さ[mm]**です（穴埋め・平滑化・揺れの抑え・
+  基準面による傾き補正が済んだもの）。1 枚 300KB、30fps で約 9MB/秒です。
+  別の PC へ送るときは有線 LAN を推奨します。
+- **表示モードを問わず送ります。** 実演中に `v` で切り替えても別画面の地形は止まりません。
+- **砂場の四隅（エリア）が決まっていれば内側だけ**を、決まっていなければ視野全体を送ります。
+  どちらも投影像と同じ向き（左右反転後）に揃えてあるので、四隅を指定しても地形は裏返りません。
+- 高さの原点を砂面に合わせるため **`k` で基準面を取っておいてください。**
+  基準面が無いと原点がフレームごとの中央値になり、受け取る側に「no reference plane」と出ます。
+- 送信は別スレッドで行い、**間に合わないフレームは捨てて最新の 1 枚だけを送ります**
+  （溜めるとライブ表示が砂場から遅れるため）。投影の処理は送信を待ちません。
+- 相手が起動していない・途中で切れた、というときは 2 秒おきにつなぎ直し続けます。
+  つながったとき・切れたときだけ、画面左上とコンソールに 1 度知らせが出ます。
+- WebSocket クライアントとして websocket-client（[requirements.txt](requirements.txt)）を使います。
+  入っていなければ配信だけを諦めて起動します。
+
+送る形は 1 フレーム 1 メッセージのバイナリです（ヘッダ長 uint32 + JSON ヘッダ + float32 の高さ）。
+詳しくは [streamer.py](src/topo_sandbox/streamer.py) の冒頭を見てください。
 
 ### 彩色アルゴリズム（COLORING モード）
 

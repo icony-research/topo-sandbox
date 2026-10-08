@@ -27,6 +27,7 @@ src/topo_sandbox/
   renderer.py      表示モードごとの描画パイプライン。GUI から独立している
   config.py        解像度と調整値。マジックナンバーはここに集約する
   recorder.py      DEM の高さ[mm]の書き出し（--record）。外部アプリのテスト入力用
+  streamer.py      DEM の高さ[mm]のライブ配信（--stream）。topo-sandbox-live へ WebSocket で送る
   palette.py       配色テーブル（361 色）。生成物に近いデータなので整形対象外
   sensor/          base.py の DepthSource を kinect.py と replay.py が実装
   processing/      depth（欠測の穴埋めと表示階調）/ plane（基準面と傾き補正）/
@@ -58,6 +59,7 @@ scripts\run.bat --replay     Kinect 無しで保存画像を再生
 scripts\run.bat --bench      フレーム取得性能の実測（GUI 無し）
 scripts\run.bat --record     DEM の高さ[mm]を連番ファイルへ書き出す（開発用）
 scripts\run.bat --record --record-crop   砂場の四隅の内側だけを切り出す
+scripts\run.bat --stream     DEM の高さ[mm]を topo-sandbox-live へ送り続ける
 ```
 
 Python を直接叩く場合は **`CUDA_PATH` を CUDA 12.8 に設定**し、**`src` を `PYTHONPATH` に通す**こと。
@@ -211,6 +213,23 @@ scripts\run.bat             実機で最終確認
   **エリアが未指定のあいだは書き出しません。** 視野全体のフレームを混ぜて書くと、
   あとからどれが砂場だけなのか見分けられず、録り直すしかなくなるためです。
   tests/test_recorder.py で固定しています。
+
+- **ライブ配信（`streamer.py`）も実演の付帯物です。** `--stream` を付けたときだけ動き、
+  付けなければ `Renderer.streamer` が None のまま何も起きません。録画と同じく、送信は別
+  スレッドで行い、**送れていない 1 枚は新しいもので置き換えます**（待ち行列を作らない）。
+  `DemStreamer.send` は待たず例外も出さず、送信スレッドは理由を問わず例外を受けて
+  つなぎ直し続けます（スレッドが死ぬと黙って送らなくなるため）。
+  録画と違って**表示モードを問わず送り**、エリア未指定でも断らずに視野全体を送ります
+  （ライブ表示はあとから見分ける必要が無く、`v` で切り替えるたびに別画面が止まると困るため）。
+  視野全体のときは `_to_view` と同じく左右反転して、切り取ったときと向きを揃えています。
+  揃えないと、四隅を指定した瞬間に別画面の地形が左右に裏返ります。
+  websocket-client は**読んだときにしか ping に答えない**ので、送るものが無いあいだも
+  `_POLL_S` ごとに読みに行きます。やめると受け取る側（uvicorn）が 40 秒ほどで接続を切ります。
+  知らせ（`take_notice`）は接続の状態が変わったときだけ出します。投影像の上に出るので、
+  つなぎ直しのたびに出すと来場者の前で文字が点滅します。受け取る側も同じ理由で、
+  壊れたメッセージを受けても接続を切らずに無視します。
+  形式は topo-sandbox-live の `backend/app/sources/topo_sandbox.py` と対で、変えるときは
+  両方の `PROTOCOL_VERSION` を上げます。tests/test_streamer.py で固定しています。
 
 - **現場で合わせた値は `settings_store` が JSON へ保存します（Ctrl + S / 起動時に読み込み）。**
   `RenderSettings` に現場で調整する項目を足したら、`settings_store._PLAIN_FIELDS` にも
