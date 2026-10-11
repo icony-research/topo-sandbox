@@ -17,6 +17,9 @@ from .processing.plane import ReferencePlane
 from .renderer import MappingMode, ViewMode
 
 #: 保存形式の版。読めない版は無視して既定値で起動する。
+#: 項目を足すだけなら上げない（水源の位置と show_flood は版 1 のまま足した）。
+#: 古いファイルには無い項目が既定値のまま残り、古い版のアプリは知らない項目を
+#: 無視するので、どちら向きにも読める。上げると現場で保存した設定が読まれなくなる。
 FORMAT_VERSION = 1
 
 #: そのまま読み書きする値
@@ -27,6 +30,7 @@ _PLAIN_FIELDS = (
     "show_contour",
     "show_rivers",
     "river_preset",
+    "show_flood",
 )
 
 #: 基準面から保存する項目
@@ -54,6 +58,10 @@ def to_dict(settings):
     data["projector_positions"] = [
         list(map(int, position)) for position in settings.projector_positions
     ]
+
+    # 大雨（heavy_rain）は保存しない。次の起動でいきなり大雨から始まると驚く。
+    if settings.spring_position is not None:
+        data["spring_position"] = [float(value) for value in settings.spring_position]
 
     plane = settings.reference_plane
     if plane is not None:
@@ -97,6 +105,11 @@ def apply(data, settings):
             setattr(settings, name, [[int(x), int(y)] for x, y in positions])
             applied += 1
 
+    spring = data.get("spring_position")
+    if _is_spring(spring):
+        settings.spring_position = [float(value) for value in spring]
+        applied += 1
+
     plane = data.get("reference_plane")
     if isinstance(plane, dict) and all(name in plane for name in _PLANE_FIELDS):
         settings.reference_plane = ReferencePlane(
@@ -113,6 +126,18 @@ def _is_quad(positions):
         isinstance(positions, list)
         and len(positions) == 4
         and all(isinstance(p, (list, tuple)) and len(p) == 2 for p in positions)
+    )
+
+
+def _is_spring(position):
+    """水源の位置として使える値か。正規化座標なので 0〜1 に収まっていること。"""
+    return (
+        isinstance(position, list)
+        and len(position) == 2
+        and all(
+            isinstance(value, (int, float)) and not isinstance(value, bool) and 0.0 <= value <= 1.0
+            for value in position
+        )
     )
 
 

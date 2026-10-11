@@ -18,6 +18,9 @@ def _adjusted():
     settings.show_contour = True
     settings.show_rivers = True
     settings.river_preset = 0
+    settings.show_flood = True
+    settings.heavy_rain = True
+    settings.spring_position = [0.25, 0.75]
     settings.view_mode = ViewMode.DEM
     settings.mapping_mode = MappingMode.PERSPECTIVE
     settings.area_positions = [[10, 20], [12, 580], [790, 575], [788, 18]]
@@ -52,6 +55,55 @@ class TestRoundTrip:
         assert restored.mapping_mode is MappingMode.PERSPECTIVE
         assert restored.area_positions == source.area_positions
         assert restored.projector_positions == source.projector_positions
+        assert restored.show_flood
+        assert restored.spring_position == source.spring_position
+
+    def test_大雨は持ち越さない(self, tmp_path):
+        """次の起動でいきなり大雨から始まると驚く。"""
+        path = tmp_path / "settings.json"
+        settings_store.save(_adjusted(), path)
+
+        restored = RenderSettings()
+        settings_store.load(restored, path)
+
+        assert not restored.heavy_rain
+
+    def test_水源が無ければ書かない(self, tmp_path):
+        path = tmp_path / "settings.json"
+        settings_store.save(RenderSettings(), path)
+
+        assert "spring_position" not in json.loads(path.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize(
+        "broken", [[0.5], [0.5, 1.5], ["a", 0.5], [True, 0.5], {"u": 0.5}, None]
+    )
+    def test_壊れた水源は捨てる(self, tmp_path, broken):
+        path = tmp_path / "settings.json"
+        settings_store.save(_adjusted(), path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["spring_position"] = broken
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        restored = RenderSettings()
+        settings_store.load(restored, path)
+
+        assert restored.spring_position is None
+        assert restored.z_scale == _adjusted().z_scale  # 残りは読める
+
+    def test_水源の無い古いファイルも読める(self, tmp_path):
+        """版を上げずに項目を足したので、前の設営で保存したファイルがそのまま使える。"""
+        path = tmp_path / "settings.json"
+        settings_store.save(_adjusted(), path)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["spring_position"]
+        del data["show_flood"]
+        path.write_text(json.dumps(data), encoding="utf-8")
+
+        restored = RenderSettings()
+        settings_store.load(restored, path)
+
+        assert restored.spring_position is None
+        assert restored.area_positions == _adjusted().area_positions
 
     def test_基準面も戻る(self, tmp_path):
         """センサを動かしていなければ、取り直さずに済む。"""
