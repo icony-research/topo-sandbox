@@ -28,10 +28,20 @@ _WAIT_S = 2.0
 
 def _decode(message):
     """encode_frame の逆。受け取る側と同じ読み方をする。"""
+    header, heights, _, header_len = _decode_with_flood(message)
+    return header, heights, header_len
+
+
+def _decode_with_flood(message):
+    """水深も読む。水深が無ければ None。"""
     (header_len,) = struct.unpack_from("<I", message, 0)
     header = json.loads(message[4 : 4 + header_len].decode("utf-8"))
-    heights = np.frombuffer(message, dtype="<f4", offset=4 + header_len)
-    return header, heights.reshape(header["rows"], header["cols"]), header_len
+    rows, cols = header["rows"], header["cols"]
+    layers = 2 if header.get("flood") else 1
+    data = np.frombuffer(message, dtype="<f4", offset=4 + header_len)
+    assert data.size == layers * rows * cols
+    grids = data.reshape(layers, rows, cols)
+    return header, grids[0], (grids[1] if layers == 2 else None), header_len
 
 
 def _wait_until(predicate):
@@ -124,6 +134,27 @@ class TestEncode:
             _, _, header_len = _decode(message)
             assert (4 + header_len) % 4 == 0
 
+    def test_水深は高さの後ろに続ける(self):
+        heights = _height(3.0, (2, 3))
+        water = np.arange(6, dtype=np.float32).reshape(2, 3)
+        header, decoded, flood, _ = _decode_with_flood(encode_frame(heights, {}, water))
+
+        assert header["flood"] is True
+        np.testing.assert_array_equal(decoded, heights)
+        np.testing.assert_array_equal(flood, water)
+
+    def test_水深が無ければfloodを付けない(self):
+        """受け取る側は flood が無ければ高さだけだと読む。送る量も増やさない。"""
+        message = encode_frame(_height(1.0, (2, 2)), {})
+        header, _, flood, _ = _decode_with_flood(message)
+        assert "flood" not in header
+        assert flood is None
+        assert len(message) == 4 + struct.unpack_from("<I", message, 0)[0] + 2 * 2 * 4
+
+    def test_水深の大きさが高さと違えば断る(self):
+        with pytest.raises(ValueError):
+            encode_frame(_height(1.0, (2, 2)), {}, _height(0.0, (2, 3)))
+
     def test_float64でもfloat32で送る(self):
         heights = np.full((2, 3), 1.25, dtype=np.float64)
         message = encode_frame(heights, {})
@@ -147,6 +178,15 @@ class TestSend:
         assert header["waterLevelMm"] == -40.0
         assert heights.shape == (240, 320)
         assert float(heights[0, 0]) == 12.5
+
+    def test_水深も届く(self, streamer, server):
+        water = _height(4.0)
+        streamer.send(_height(1.0), reference=True, flood_mm=water)
+        assert _wait_until(lambda: server.latest.sent)
+
+        header, _, flood, _ = _decode_with_flood(server.latest.sent[0])
+        assert header["flood"] is True
+        np.testing.assert_array_equal(flood, water)
 
     def test_基準面が無ければ原点が中央値だと分かる(self, streamer, server):
         streamer.send(_height(0.0))
@@ -316,13 +356,14 @@ class _SpyStreamer:
     def __init__(self):
         self.calls = []
 
-    def send(self, height_mm, cropped=False, reference=False, water_level_mm=None):
+    def send(self, height_mm, cropped=False, reference=False, water_level_mm=None, flood_mm=None):
         self.calls.append(
             {
                 "height_mm": np.array(height_mm),
                 "cropped": cropped,
                 "reference": reference,
                 "water_level_mm": water_level_mm,
+                "flood_mm": None if flood_mm is None else np.array(flood_mm),
             }
         )
         return True
@@ -357,6 +398,34 @@ def _settings(view_mode=ViewMode.DEM, area=None):
     settings.reference_plane = _plane()
     if area:
         settings.area_positions = [list(point) for point in area]
+    return settings
+
+
+class _StubFlood:
+    """決まった水深を返す水の身代わり。"""
+
+    def __init__(self, water):
+        self.water = water
+
+    def update(self, height_mm, elapsed_s, **kwargs):
+        return self.water
+
+    def reset(self):
+        pass
+
+
+def _left_half_water():
+    """センサから見て左半分に 5mm の水がある水深[mm]（処理解像度）。"""
+    width, height = config.PROC_SIZE
+    water = np.zeros((height, width), dtype=np.float32)
+    water[:, : width // 2] = 5.0
+    return water
+
+
+def _flood_settings(area=None):
+    settings = _settings(area=area)
+    settings.show_flood = True
+    settings.spring_position = [0.5, 0.5]
     return settings
 
 
@@ -415,6 +484,43 @@ class TestRendererIntegration:
         settings.water_level_mm = -25.0
         Renderer(streamer=spy).render(_sensor_frame(), settings)
         assert spy.calls[0]["water_level_mm"] == -25.0
+
+    def test_水を流していなければ水深は送らない(self):
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _settings())
+        assert spy.calls[0]["flood_mm"] is None
+
+    def test_水源の水を投影と同じ向きで送る(self):
+        """高さと同じく左右反転して送る。揃えないと水が地形の反対側に乗る。"""
+        spy = _SpyStreamer()
+        renderer = Renderer(streamer=spy)
+        renderer._flood = _StubFlood(_left_half_water())
+        renderer.render(_sensor_frame(), _flood_settings())
+
+        flood = spy.calls[0]["flood_mm"]
+        assert flood.shape == spy.calls[0]["height_mm"].shape
+        width = flood.shape[1]
+        # センサの左半分の水は、投影像では右半分に来る（盛った砂と同じ側）
+        assert flood[:, width * 3 // 4].mean() == pytest.approx(5.0)
+        assert flood[:, width // 4].mean() == pytest.approx(0.0)
+
+    def test_切り取るときは水も同じく切り取る(self):
+        width, height = config.VIEW_SIZE
+        whole = [[0, 0], [0, height], [width, height], [width, 0]]
+        spy = _SpyStreamer()
+        renderer = Renderer(streamer=spy)
+        renderer._flood = _StubFlood(_left_half_water())
+        renderer.render(_sensor_frame(), _flood_settings(area=whole))
+
+        call = spy.calls[0]
+        assert call["cropped"] is True
+        flood, heights = call["flood_mm"], call["height_mm"]
+        assert flood.shape == heights.shape
+        columns = flood.shape[1]
+        # 水のある側と盛った砂の側が一致する
+        assert flood[:, columns * 3 // 4].mean() == pytest.approx(5.0, abs=0.1)
+        assert heights[:, columns * 3 // 4].mean() == pytest.approx(50.0, abs=1.0)
+        assert flood[:, columns // 4].mean() == pytest.approx(0.0, abs=0.1)
 
     def test_配信なしでも描ける(self):
         """普段の起動は streamer が None。ここが落ちると実演が止まる。"""

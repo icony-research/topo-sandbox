@@ -344,26 +344,30 @@ class Renderer:
         # 基準面からの高さ[mm]。基準面があればセンサの傾きも打ち消される。
         height_mm = pointcloud.heights_from_depth(depth_mm, settings.reference_plane)
 
+        # 水源の水。配信にも同じ水を載せるので、描く前にここで流しておく。
+        flood_mm = None
+        if self._flood_active(settings):
+            flood_mm = self._update_flood(height_mm, settings)
+        else:
+            # 見えていないあいだは水を持ち越さない。DEM へ戻ったとき、
+            # 砂場を作り変えたあとの地形に前の水が残っていると不自然になる。
+            self._flood.reset()
+
         # ライブ表示アプリへ送る（--stream のときだけ）。録画と違って表示モードを
         # 問わないのは、実演中に v で切り替えるたびに別画面の地形が止まると困るため。
         # 描く前に渡すのは、重いフレームの描画を待って送るのが遅れないようにするため。
         if self.streamer is not None:
-            self._stream(height_mm, settings)
+            self._stream(height_mm, settings, flood_mm)
 
         # 画面に出す深度・DEM・等高線は 8bit の階調を使う。
         # 高さの符号を反転して「大きいほど低い」に揃える。
         display = depth.to_display(-height_mm)
 
         mode = settings.view_mode
-        if not self._flood_active(settings):
-            # 見えていないあいだは水を持ち越さない。DEM へ戻ったとき、
-            # 砂場を作り変えたあとの地形に前の水が残っていると不自然になる。
-            self._flood.reset()
-
         if mode is ViewMode.COLORING:
             return self._render_coloring(height_mm, settings)
         if mode is ViewMode.DEM:
-            return self._render_dem(height_mm, display, settings)
+            return self._render_dem(height_mm, display, settings, flood_mm)
         if mode is ViewMode.DEPTH:
             return self._render_depth(height_mm, display, settings)
         if mode is ViewMode.EDGE:
@@ -457,7 +461,25 @@ class Renderer:
             and settings.reference_plane is not None
         )
 
-    def _render_dem(self, height_mm, display, settings):
+    def _update_flood(self, height_mm, settings):
+        """水源の水を経った時間ぶん流し、見せる水深[mm]を返す。
+
+        海へ流れ込んだ水はそこで消える。砂場の外へ出た水も消す
+        （エリアは左右反転後の座標なので、センサ側へ戻して渡す）。
+        """
+        area = None
+        if settings.has_area:
+            area = sensor_area_from_view(settings.area_positions)
+        return self._flood.update(
+            height_mm,
+            self._elapsed(),
+            spring_uv=settings.spring_position,
+            heavy_rain=settings.heavy_rain,
+            sea_level_mm=settings.water_level_mm,
+            area_uv=area,
+        )
+
+    def _render_dem(self, height_mm, display, settings, flood_mm=None):
         # 点群表示アプリのテスト入力として書き出す（--record のときだけ）。
         # 描く前に積むのは、重いフレームの描画を待って書き出しが遅れないようにするため。
         if self.recorder is not None:
@@ -500,22 +522,9 @@ class Renderer:
                 # 6 倍になり、それだけで 1 フレームの予算の半分を使う。
                 terrain = overlays.draw_rivers(terrain, strength)
 
-            if self._flood_active(settings):
-                # 海へ流れ込んだ水はそこで消える。砂場の外へ出た水も消す
-                # （エリアは左右反転後の座標なので、センサ側へ戻して渡す）。
-                area = None
-                if settings.has_area:
-                    area = sensor_area_from_view(settings.area_positions)
-                water = self._flood.update(
-                    height_mm,
-                    elapsed,
-                    spring_uv=settings.spring_position,
-                    heavy_rain=settings.heavy_rain,
-                    sea_level_mm=settings.water_level_mm,
-                    area_uv=area,
-                )
+            if flood_mm is not None:
                 # 川と同じく、拡大する前に混ぜる。
-                terrain = overlays.draw_flood(terrain, water, elapsed)
+                terrain = overlays.draw_flood(terrain, flood_mm, elapsed)
 
             dem = self._to_projection(terrain, settings)
 
@@ -555,7 +564,7 @@ class Renderer:
             frame_context(settings.reference_plane, settings.water_level_mm, area),
         )
 
-    def _stream(self, height_mm, settings):
+    def _stream(self, height_mm, settings, flood_mm=None):
         """ライブ表示アプリへ高さ[mm]を 1 枚渡す。
 
         砂場の四隅が決まっていれば内側だけを切り取って送る。決まっていなければ
@@ -566,20 +575,27 @@ class Renderer:
         どちらも**投影像と同じ向き**（左右反転後）に揃える。切り取ったものは
         `crop_to_area` が反転済みなので、視野全体のときだけここで反転する。
         揃えないと、四隅を指定した瞬間にライブ表示の地形が左右に裏返る。
+
+        水源の水（``flood_mm``）を流していれば、高さと同じ切り取り・向きで一緒に送る。
         """
-        frame = None
+        frame = water = None
         if settings.has_area:
             frame = crop_to_area(height_mm, settings.area_positions)
+            if frame is not None and flood_mm is not None:
+                water = crop_to_area(flood_mm, settings.area_positions)
 
         cropped = frame is not None
         if not cropped:
             frame = height_mm[:, ::-1]
+            if flood_mm is not None:
+                water = flood_mm[:, ::-1]
 
         self.streamer.send(
             frame,
             cropped=cropped,
             reference=settings.reference_plane is not None,
             water_level_mm=settings.water_level_mm,
+            flood_mm=water,
         )
 
     def _render_depth(self, height_mm, display, settings):

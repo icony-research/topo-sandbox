@@ -250,6 +250,10 @@ scripts\run.bat             実機で最終確認
   壊れたメッセージを受けても接続を切らずに無視します。
   形式は topo-sandbox-live の `backend/app/sources/topo_sandbox.py` と対で、変えるときは
   両方の `PROTOCOL_VERSION` を上げます。tests/test_streamer.py で固定しています。
+  **版 2 で水源の水の水深（`"flood"`）を足しました。** 水を流しているあいだだけ高さの後ろに
+  続けて送り、高さと同じ切り取り・左右反転をかけます（揃えないと 3D 表示で水が川筋から外れる）。
+  投影と配信が同じフレームの同じ水を使うよう、`FloodSimulator.update` は `render` の頭で
+  配信より前に 1 度だけ呼び、結果を `_render_dem` へ渡しています。
 
 - **現場で合わせた値は `settings_store` が JSON へ保存します（Ctrl + S / 起動時に読み込み）。**
   `RenderSettings` に現場で調整する項目を足したら、`settings_store._PLAIN_FIELDS` にも
