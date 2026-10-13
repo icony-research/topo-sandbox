@@ -138,6 +138,7 @@ run.bat --near       Near Mode（Kinect for Windows センサのみ）
 run.bat --bench      フレーム取得性能の実測（GUI 無し）
 run.bat --record     DEM の高さを書き出す（開発用。「DEM の高さを書き出す」参照）
 run.bat --stream     砂場の高さを別画面のライブ表示へ送る（「ライブ表示アプリへ送る」参照）
+run_lan.bat          2 台構成の本番用。LAN 越しに 3D 表示 PC（192.168.10.2）へ送る
 ```
 
 800×600 のウィンドウが開きます。`F11` で全画面（枠なし最大化）に切り替え、プロジェクタ側のディスプレイへ移動して使用します。
@@ -364,7 +365,12 @@ python scripts\view_record.py --save out            画面を出さずに PNG �
 run.bat --stream                                       同じ PC の topo-sandbox-live へ送る
 run.bat --stream ws://192.168.0.10:8000/ws/ingest      別の PC へ送る
 run.bat --replay --stream                              Kinect 無しで試す
+run_lan.bat                                            2 台構成の本番（3D 表示 PC 192.168.10.2 へ送る）
 ```
+
+2 台の PC をハブと LAN ケーブルでつなぐ本番の構成（固定 IP・ファイアウォール・当日の手順）は、
+topo-sandbox-live の README の「2 台で展示する（ハブと LAN ケーブル）」にまとめてあります。
+3D 表示 PC の IP を変えたときは [scripts/run_lan.bat](scripts/run_lan.bat) の `LIVE_PC` を直してください。
 
 受け取る側は topo-sandbox-live を次の設定で起動しておきます（どちらを先に起動しても構いません）。
 
@@ -409,7 +415,7 @@ topo-sandbox-live が要ります（古い topo-sandbox-live は版の違いを�
 ## イベント当日の手順
 
 1. Kinect（電源アダプタ込み）とプロジェクタを接続する。
-2. `scripts/run.bat` を実行する。
+2. `scripts/run.bat` を実行する（3D 表示 PC と 2 台で展示するときは `scripts/run_lan.bat`）。
 3. ウィンドウをプロジェクタ側のディスプレイへ移動し、`F11` で全画面にする。
 4. 砂場の四隅を**左上から反時計回りに** 4 点クリックし、`j` で射影変換モードにする。
 5. 砂を平らにならして `k` を押す（基準面の取得。約 1 秒）。画面に距離・傾き・残差が出る。
