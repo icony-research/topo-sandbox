@@ -1,7 +1,7 @@
 # TopoSandbox  Python 依存パッケージ（本番環境で固定しているバージョン）
 #
-#   mamba create -n ar_sandbox python=3.9
-#   mamba activate ar_sandbox
+#   python -m venv .venv            Python 3.12 以上（3.14 で動作確認）
+#   .venv\Scripts\activate
 #   pip install -r requirements.txt
 #
 # 注意 1: cupy は GPU 世代に合わせる必要がある。
@@ -12,20 +12,22 @@
 #         Python 3.8 以降は DLL 探索に PATH を使わないため、PATH 追加では解決しない。
 #
 # 注意 3: OpenCV は CUDA 版である必要はない。コード中に cv2.cuda の使用は無い。
+#
+# 下限の Python 3.12 は numpy 2.5 の要件で決まっている（pythonnet 3.2 は 3.11 以上、
+# open3d 0.20 と cupy 14 は 3.10 以上）。
 
-numpy==1.23.1
-open3d==0.15.1
-Pillow==9.2.0
-opencv-python==4.11.0.86
-cupy-cuda12x==13.6.0
+numpy==2.5.4
+open3d==0.20.0
+Pillow==12.3.0
+opencv-python==5.0.0.93
+cupy-cuda12x==14.2.0
 
 # Kinect SDK 1.8 の Microsoft.Kinect.dll を Python から利用するために使用する
-pythonnet==3.0.5
+pythonnet==3.2.1
 
 # --stream（ライブ表示アプリへの配信）で使う WebSocket クライアント。純 Python。
-# 2026-10-07 時点で ar_sandbox / ar_sandbox_dev のどちらにも既に入っていた版に合わせている。
-websocket-client==1.9.0
+websocket-client==1.9.2
 
 # 開発用
-pytest==8.4.2
+pytest==9.1.1
 ruff

@@ -78,16 +78,16 @@ TopoSandbox/
 
 ## 動作要件
 
-以下は 2026-09-18 時点で動作を確認した構成です。
+以下は 2026-10-13 時点で動作を確認した構成です。
 
 - Windows 11
 - Kinect for Windows SDK v1.8 — インストーラが環境変数 `KINECTSDK10_DIR` を設定します
 - Kinect v1 センサ本体 + **電源アダプタ**（USB だけでは動作しません）
 - **メモリ整合性（HVCI）が無効であること** — 有効だと Kinect ドライバが読み込まれません。「トラブルシューティング」参照
-- Python 3.9（conda / miniforge）
+- Python 3.12 以上（3.14 で動作確認）
 - CUDA 対応 GPU と CUDA Toolkit 12.x — 彩色処理に CuPy を使います
 
-動作確認環境: RTX 5070 Laptop (Blackwell / sm_120) + CUDA 12.8 + cupy 13.6.0
+動作確認環境: RTX 5070 Laptop (Blackwell / sm_120) + CUDA 12.8 + cupy 14.2.0
 
 ---
 
@@ -111,32 +111,25 @@ Kinect を接続し、デバイスマネージャーで `Kinect for Windows Came
 
 ### 3. Python 環境の構築
 
-[miniforge](https://github.com/conda-forge/miniforge) をインストールしてから:
+リポジトリ直下に venv を作ります（topo-sandbox-live の `backend\.venv` と同じ作り方です）。Python は 3.12 以上であれば、python.org 版でも miniforge の base でも構いません。
 
 ```bat
-mamba create -n ar_sandbox python=3.9
-mamba activate ar_sandbox
+python -m venv .venv
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-> miniforge を全ユーザー向け（`C:\ProgramData\miniforge3`）に入れた場合、一般ユーザーでは
-> パッケージキャッシュに書き込めず env を作成できません。`%USERPROFILE%\.condarc` に
-> 以下を設定するか、「Just Me」で入れ直してください。
->
-> ```yaml
-> envs_dirs: [C:\Users\<user>\.conda\envs]
-> pkgs_dirs: [C:\Users\<user>\.conda\pkgs]
-> ```
+[scripts/run.bat](scripts/run.bat) は `.venv\Scripts\python.exe` を直接使うので、起動のたびに activate する必要はありません。
 
 ### 4. ランチャのパス確認
 
-[scripts/run.bat](scripts/run.bat) に conda と CUDA の絶対パスが書かれています。環境が異なる場合は修正してください。
+[scripts/run.bat](scripts/run.bat) に CUDA の絶対パスが書かれています。環境が異なる場合は修正してください。
 
 ---
 
 ## 使い方
 
-[scripts/run.bat](scripts/run.bat) を実行します。 conda 環境の有効化と `CUDA_PATH` の設定を行ってからアプリを起動します。
+[scripts/run.bat](scripts/run.bat) を実行します。 `CUDA_PATH` を設定してから、`.venv` の Python でアプリを起動します。
 
 ```bat
 run.bat              通常起動
@@ -244,6 +237,8 @@ run.bat --stream     砂場の高さを別画面のライブ表示へ送る（�
 ---
 
 ## 開発
+
+`.venv\Scripts\activate` したコマンドプロンプトで実行します。
 
 ```bat
 pytest                 テスト（Kinect も GPU も不要）
@@ -557,10 +552,6 @@ Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\D
 ### run.bat が「'xxx' は認識されていません」で失敗する
 
 **原因: バッチファイルが UTF-8 で保存されている。** cmd は CP932 で解釈するため、日本語コメントが壊れて行が分断されます。Shift-JIS(CP932) + CRLF で保存してください。
-
-### mamba / conda で env が作れない（`Could not open lockfile`）
-
-**原因: miniforge が `C:\ProgramData` にあり、一般ユーザーに書き込み権限がない。** セットアップ手順 3 の `.condarc` 設定を参照してください。管理者権限で実行する方法は、管理者で作った env を一般ユーザーで使うときに同じ問題が再発するため推奨しません。
 
 ---
 

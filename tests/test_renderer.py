@@ -74,7 +74,7 @@ class TestPerspectiveMatrix:
 
         matrix = Renderer._perspective_matrix(None, settings)
 
-        for source, expected in zip(area, projector):
+        for source, expected in zip(area, projector, strict=True):
             np.testing.assert_allclose(_apply(matrix, source), expected, atol=1e-3)
 
     def test_既定の投影枠では画面全体へ引き伸ばされる(self):
