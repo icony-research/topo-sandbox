@@ -6,6 +6,7 @@ import pytest
 from topo_sandbox import config
 from topo_sandbox.processing.depth import (
     INVALID_DEPTH,
+    HandHold,
     TemporalStabilizer,
     fill_invalid,
     preprocess,
@@ -225,3 +226,149 @@ class TestTemporalStabilizer:
         stabilizer.reset()
         frame = np.full((4, 4), 900.0, dtype=np.float32)
         np.testing.assert_allclose(stabilizer.apply(frame), frame)
+
+
+class TestHandHold:
+    """砂を動かす手を地形として描かない。
+
+    手も盛った砂も「高くなった」としか見えない。違いは、手は動き続け、
+    砂は置かれたら動かないこと。
+    """
+
+    _BASE = 1000.0
+
+    def _flat(self, shape=(40, 40)):
+        return np.full(shape, self._BASE, dtype=np.float32)
+
+    def _hand(self, column, rise_mm=150.0):
+        """左から伸びてくる手。column より左が手で覆われている。"""
+        frame = self._flat()
+        frame[15:25, :column] -= rise_mm
+        return frame
+
+    def _sliding_hand(self, tip):
+        """左から伸びてくる手。指先から手首へ向けて高くなる。
+
+        動かすと、手の下の画素の高さも変わり続ける（平らな板だと、覆われた
+        ところは止まって見えてしまい、本物の手と違う）。
+        """
+        frame = self._flat()
+        columns = np.arange(frame.shape[1])
+        rise = np.where(columns < tip, 40.0 + 6.0 * (tip - columns), 0.0)
+        frame[15:25] -= rise.astype(np.float32)
+        return frame
+
+    def _hold(self, **overrides):
+        overrides.setdefault("settle_s", 0.5)
+        return HandHold(**overrides)
+
+    def test_動いている手は描かない(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        for frame in range(30):  # 1 秒、手を動かし続ける
+            result = hold.apply(self._sliding_hand(5 + frame), frame / 30.0)
+            np.testing.assert_allclose(result, self._BASE)
+
+    def test_手の縁も描かない(self):
+        """平滑化で砂面へなだらかにつながる縁が、低い土手として残らないこと。"""
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        frame = self._hand(20)
+        frame[14, :20] = frame[25, :20] = self._BASE - 6.0  # しきい値より低い縁
+        result = hold.apply(frame, 1.0 / 30.0)
+
+        np.testing.assert_allclose(result, self._BASE)
+
+    def test_手を抜くと砂がそのまま見える(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+        hold.apply(self._hand(20), 0.1)
+
+        np.testing.assert_allclose(hold.apply(self._flat(), 0.2), self._BASE)
+
+    def test_盛った砂は落ち着いてから出る(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        piled = self._flat()
+        piled[10:20, 10:20] -= 30.0
+        assert hold.apply(piled, 0.1)[15, 15] == pytest.approx(self._BASE)
+        assert hold.apply(piled, 0.4)[15, 15] == pytest.approx(self._BASE)  # まだ待つ
+        assert hold.apply(piled, 0.7)[15, 15] == pytest.approx(self._BASE - 30.0)
+
+    def test_止めた手は待つ時間のあとで出る(self):
+        """砂か手かは動きでしか見分けられない。逃げ道が無いことを固定しておく。"""
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        hold.apply(self._hand(20), 0.1)
+        result = hold.apply(self._hand(20), 0.7)
+        assert result[20, 5] == pytest.approx(self._BASE - 150.0)
+
+    def test_掘った変化は待たない(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        dug = self._flat()
+        dug[10:20, 10:20] += 30.0
+        result = hold.apply(dug, 1.0 / 30.0)
+
+        assert result[15, 15] == pytest.approx(self._BASE + 30.0)
+
+    def test_手のそばで掘った変化も待たない(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        frame = self._hand(20)
+        frame[26, 5] += 30.0  # 手のすぐ下を掘った
+        result = hold.apply(frame, 1.0 / 30.0)
+
+        assert result[26, 5] == pytest.approx(self._BASE + 30.0)
+
+    def test_砂へ下ろしている手も描かない(self):
+        """前のフレームと比べると、下ろす動きが「低くなった」に見えて通ってしまう。"""
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        for frame in range(1, 30):  # 150mm の高さから 4mm ずつ下ろす
+            result = hold.apply(self._hand(20, rise_mm=150.0 - frame * 4.0), frame / 30.0)
+
+        np.testing.assert_allclose(result, self._BASE)
+
+    def test_小さな揺れは素通し(self):
+        """揺れを均すのは TemporalStabilizer の仕事。ここでは何もしない。"""
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+
+        frame = self._flat() - 2.0
+        np.testing.assert_allclose(hold.apply(frame, 1.0 / 30.0), frame)
+
+    def test_0なら素通しになる(self):
+        """現場で外せる逃げ道。"""
+        hold = self._hold(settle_s=0.0)
+        hold.apply(self._flat(), 0.0)
+
+        np.testing.assert_allclose(hold.apply(self._hand(20), 0.1), self._hand(20))
+
+    def test_時計が戻っても古い地形が残り続けない(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 10.0)
+        hold.apply(self._hand(20), 10.1)
+
+        result = hold.apply(self._hand(20), 5.0)
+
+        assert result[20, 5] == pytest.approx(self._BASE - 150.0)
+
+    def test_解像度が変わっても落ちない(self):
+        hold = self._hold()
+        hold.apply(self._flat((10, 10)), 0.0)
+        assert hold.apply(self._flat((20, 20)), 0.1).shape == (20, 20)
+
+    def test_忘れさせられる(self):
+        hold = self._hold()
+        hold.apply(self._flat(), 0.0)
+        hold.reset()
+
+        np.testing.assert_allclose(hold.apply(self._hand(20), 0.1), self._hand(20))
