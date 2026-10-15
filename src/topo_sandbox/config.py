@@ -303,7 +303,7 @@ FLOOD_SPRING_FLOW = 700.0
 FLOOD_SPRING_RADIUS = 3
 
 #: 大雨（o キー）のとき、水源の量を何倍にするか。
-FLOOD_RAIN_FACTOR = 3.0
+FLOOD_RAIN_FACTOR = 6.0
 
 #: 砂へしみ込んで消える水[mm/秒]。どのマスからも一様に引く。
 #: これが無いと、行き場の無い水が砂場に溜まり続けて最後は全部が水になる。
