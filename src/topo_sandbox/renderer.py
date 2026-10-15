@@ -364,11 +364,14 @@ class Renderer:
         # 川（D8）。水と同じく配信にも同じ川を載せるので、描く前にここで求めておく。
         river = self._river_strength(height_mm, settings)
 
+        # 等高線を引く高さ。配信にも同じ間隔を載せるので、描く前にここで求めておく。
+        contour_mm = self._contour_heights(height_mm, settings)
+
         # ライブ表示アプリへ送る（--stream のときだけ）。録画と違って表示モードを
         # 問わないのは、実演中に v で切り替えるたびに別画面の地形が止まると困るため。
         # 描く前に渡すのは、重いフレームの描画を待って送るのが遅れないようにするため。
         if self.streamer is not None:
-            self._stream(height_mm, settings, flood_mm, river)
+            self._stream(height_mm, settings, flood_mm, river, contour_mm)
 
         # 画面に出す深度・DEM・等高線は 8bit の階調を使う。
         # 高さの符号を反転して「大きいほど低い」に揃える。
@@ -376,11 +379,11 @@ class Renderer:
 
         mode = settings.view_mode
         if mode is ViewMode.COLORING:
-            return self._render_coloring(height_mm, settings)
+            return self._render_coloring(height_mm, settings, contour_mm)
         if mode is ViewMode.DEM:
-            return self._render_dem(height_mm, display, settings, flood_mm, river)
+            return self._render_dem(height_mm, display, settings, flood_mm, river, contour_mm)
         if mode is ViewMode.DEPTH:
-            return self._render_depth(height_mm, display, settings)
+            return self._render_depth(height_mm, display, settings, contour_mm)
         if mode is ViewMode.EDGE:
             return self._render_edge(height_mm, settings)
         raise ValueError(f"未知の表示モード: {mode!r}")
@@ -435,7 +438,17 @@ class Renderer:
         return self._to_view(image)
 
     # ------------------------------------------------------------------
-    def _draw_contours(self, height_mm, canvas, settings):
+    def _contour_heights(self, height_mm, settings):
+        """等高線を引く高さ[mm]を投影解像度で返す。引かないなら None。
+
+        投影と配信が同じ間隔を使うよう、`render` の頭で 1 度だけ求める。
+        エッジ表示には等高線を重ねない。
+        """
+        if not settings.show_contour or settings.view_mode is ViewMode.EDGE:
+            return None
+        return self._to_projection(height_mm, settings)
+
+    def _draw_contours(self, contour_mm, canvas):
         """等高線を重ねる。
 
         等高線だけは拡大したあとに描く。線の太さを投影解像度で決めたいのと、
@@ -447,16 +460,16 @@ class Renderer:
         センサの揺れで線が 1 画素ぶん踊るのを抑える。毎フレーム引き直すと、
         砂を動かしていなくても線が細かく動く。
         """
-        return self._contours.draw(self._to_projection(height_mm, settings), canvas)
+        return self._contours.draw(contour_mm, canvas)
 
-    def _render_coloring(self, height_mm, settings):
+    def _render_coloring(self, height_mm, settings, contour_mm=None):
         colored = self._colorize(height_mm, settings)
 
         if self._use_perspective(settings):
             colored = self._warp(colored, settings)
 
-        if settings.show_contour:
-            colored = self._draw_contours(height_mm, colored, settings)
+        if contour_mm is not None:
+            colored = self._draw_contours(contour_mm, colored)
         return colored
 
     @staticmethod
@@ -518,7 +531,7 @@ class Renderer:
         flow = rivers.river_strength(height_mm, min_cells, full_cells)
         return np.where(dry, flow, 0.0).astype(np.float32)
 
-    def _render_dem(self, height_mm, display, settings, flood_mm=None, river=None):
+    def _render_dem(self, height_mm, display, settings, flood_mm=None, river=None, contour_mm=None):
         # 点群表示アプリのテスト入力として書き出す（--record のときだけ）。
         # 描く前に積むのは、重いフレームの描画を待って書き出しが遅れないようにするため。
         if self.recorder is not None:
@@ -553,8 +566,8 @@ class Renderer:
 
             dem = self._to_projection(terrain, settings)
 
-        if settings.show_contour:
-            dem = self._draw_contours(height_mm, dem, settings)
+        if contour_mm is not None:
+            dem = self._draw_contours(contour_mm, dem)
         return dem
 
     def _record(self, height_mm, settings):
@@ -589,7 +602,7 @@ class Renderer:
             frame_context(settings.reference_plane, settings.water_level_mm, area),
         )
 
-    def _stream(self, height_mm, settings, flood_mm=None, river=None):
+    def _stream(self, height_mm, settings, flood_mm=None, river=None, contour_mm=None):
         """ライブ表示アプリへ高さ[mm]を 1 枚渡す。
 
         砂場の四隅が決まっていれば内側だけを切り取って送る。決まっていなければ
@@ -602,7 +615,8 @@ class Renderer:
         揃えないと、四隅を指定した瞬間にライブ表示の地形が左右に裏返る。
 
         水源の水（``flood_mm``）や川（``river``）を描いていれば、高さと同じ切り取り・
-        向きで一緒に送る。
+        向きで一緒に送る。等高線を引いていれば（``contour_mm``）、その間隔[mm]を
+        添える。線そのものは送らず、受け取る側が高さから同じ間隔で引く。
         """
         frame = water = strength = None
         if settings.has_area:
@@ -627,17 +641,20 @@ class Renderer:
             water_level_mm=settings.water_level_mm,
             flood_mm=water,
             river=strength,
+            contour_interval_mm=(
+                None if contour_mm is None else overlays.contour_interval(contour_mm)
+            ),
         )
 
-    def _render_depth(self, height_mm, display, settings):
+    def _render_depth(self, height_mm, display, settings, contour_mm=None):
         depth_view = self._to_view(display)
         depth_view = cv2.bitwise_not(depth_view)
 
         if self._use_perspective(settings):
             depth_view = self._warp(depth_view, settings)
 
-        if settings.show_contour:
-            depth_view = self._draw_contours(height_mm, depth_view, settings)
+        if contour_mm is not None:
+            depth_view = self._draw_contours(contour_mm, depth_view)
         return depth_view
 
     def _render_edge(self, height_mm, settings):

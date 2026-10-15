@@ -23,7 +23,7 @@
 
     {"type": "height", "version": 3, "rows": 240, "cols": 320, "index": 12,
      "unit": "mm", "cropped": true, "origin": "reference", "waterLevelMm": -40.0,
-     "flood": true}
+     "contourIntervalMm": 5.0, "flood": true}
 
 水深は水源から流れた水（:mod:`~topo_sandbox.processing.flood`、``w`` キー）で、
 投影に描いているものと同じ（描かないところは 0）。高さと同じ格子・同じ向きに
@@ -34,6 +34,11 @@
 投影の DEM に重ねているものと同じ（描かないところは 0、水面より下も 0）。
 水深と同じく高さと同じ格子・同じ向きに揃え、描いていないときは ``rivers`` を
 付けず送らない。水深と両方あるときは水深が先。
+
+``contourIntervalMm`` は等高線（``t`` キー）の間隔[mm]で、投影に引いているものと
+同じ（起伏が広くて広げたときは広げたあとの値）。引いていないときは null。
+受け取る側は高さからこの間隔で線を引くので、格子は増やさない。並びが
+変わらないので版は上げていない（知らない受け取り側は読み飛ばす）。
 
 受け取る側の定義は topo-sandbox-live の ``backend/app/sources/topo_sandbox.py``。
 形を変えるときは両方を揃え、:data:`PROTOCOL_VERSION` を上げる。
@@ -60,6 +65,7 @@ from . import config
 
 #: 送る形式の版。受け取る側が形の違いに気付けるようにする。
 #: 2 で水源の水の水深（"flood"）を、3 で川らしさ（"rivers"）を足した。
+#: 等高線の間隔（"contourIntervalMm"）はヘッダだけで並びを変えないので、版は 3 のまま。
 PROTOCOL_VERSION = 3
 
 _HEADER_LEN = struct.Struct("<I")
@@ -219,6 +225,7 @@ class DemStreamer:
         water_level_mm=None,
         flood_mm=None,
         river=None,
+        contour_interval_mm=None,
     ):
         """高さ[mm]を 1 枚、送信待ちへ置く。
 
@@ -232,6 +239,7 @@ class DemStreamer:
             water_level_mm: そのときの水位[mm]。
             flood_mm: 水源の水の水深[mm] (H, W)。高さと同じ大きさ。流していなければ None。
             river: 川らしさ 0〜1 (H, W)。高さと同じ大きさ。描いていなければ None。
+            contour_interval_mm: 投影に引いている等高線の間隔[mm]。引いていなければ None。
 
         Returns:
             置けたら True。止まっているなら False。
@@ -253,6 +261,9 @@ class DemStreamer:
             "cropped": bool(cropped),
             "origin": "reference" if reference else "median",
             "waterLevelMm": None if water_level_mm is None else float(water_level_mm),
+            "contourIntervalMm": (
+                None if contour_interval_mm is None else float(contour_interval_mm)
+            ),
         }
 
         with self._lock:

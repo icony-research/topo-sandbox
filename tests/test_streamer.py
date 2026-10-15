@@ -237,6 +237,21 @@ class TestSend:
         assert flood is None
         np.testing.assert_array_equal(river, strength)
 
+    def test_等高線の間隔も届く(self, streamer, server):
+        streamer.send(_height(1.0), reference=True, contour_interval_mm=10)
+        assert _wait_until(lambda: server.latest.sent)
+
+        header, _, flood, river, _ = _decode_layers(server.latest.sent[0])
+        assert header["contourIntervalMm"] == 10.0
+        # 線は送らない。受け取る側が高さから引く。
+        assert flood is None and river is None
+
+    def test_等高線を引いていなければ間隔はnull(self, streamer, server):
+        streamer.send(_height(1.0), reference=True)
+        assert _wait_until(lambda: server.latest.sent)
+        header, _, _ = _decode(server.latest.sent[0])
+        assert header["contourIntervalMm"] is None
+
     def test_基準面が無ければ原点が中央値だと分かる(self, streamer, server):
         streamer.send(_height(0.0))
         assert _wait_until(lambda: server.latest.sent)
@@ -413,6 +428,7 @@ class _SpyStreamer:
         water_level_mm=None,
         flood_mm=None,
         river=None,
+        contour_interval_mm=None,
     ):
         self.calls.append(
             {
@@ -422,6 +438,7 @@ class _SpyStreamer:
                 "water_level_mm": water_level_mm,
                 "flood_mm": None if flood_mm is None else np.array(flood_mm),
                 "river": None if river is None else np.array(river),
+                "contour_interval_mm": contour_interval_mm,
             }
         )
         return True
@@ -686,6 +703,45 @@ class TestRendererIntegration:
         Renderer(streamer=spy).render(_sensor_frame(), settings)
         assert spy.calls[0]["river"] is None
         assert stub_rivers == []
+
+    def test_等高線を引いていなければ間隔は送らない(self):
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _settings())
+        assert spy.calls[0]["contour_interval_mm"] is None
+
+    @pytest.mark.parametrize("mode", [ViewMode.COLORING, ViewMode.DEM, ViewMode.DEPTH])
+    def test_等高線を引いていれば間隔を送る(self, mode):
+        settings = _settings(mode)
+        settings.show_contour = True
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), settings)
+        assert spy.calls[0]["contour_interval_mm"] == config.CONTOUR_INTERVAL_MM
+
+    def test_エッジ表示では等高線の間隔を送らない(self):
+        """エッジ表示は等高線を重ねない。投影に無い線を別画面にだけ出さない。"""
+        settings = _settings(ViewMode.EDGE)
+        settings.show_contour = True
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), settings)
+        assert spy.calls[0]["contour_interval_mm"] is None
+
+    def test_起伏が広ければ投影と同じく広げた間隔を送る(self):
+        """本数の上限で投影の間隔が広がったとき、別画面だけ細かい線にならないこと。"""
+        width, height = config.SENSOR_SIZE
+        frame = np.full((height, width), _BASE_MM, dtype=np.float32)
+        # 400mm 盛る。5mm 間隔では上限の本数を超える。
+        mound_mm = 400.0
+        assert mound_mm > config.CONTOUR_INTERVAL_MM * config.CONTOUR_LEVELS
+        frame[:, : width // 2] = _BASE_MM - mound_mm
+        settings = _settings()
+        settings.show_contour = True
+        spy = _SpyStreamer()
+        renderer = Renderer(streamer=spy)
+        renderer.render(frame, settings)
+
+        sent = spy.calls[0]["contour_interval_mm"]
+        assert sent > config.CONTOUR_INTERVAL_MM
+        assert sent == renderer._contours._interval
 
     def test_配信なしでも描ける(self):
         """普段の起動は streamer が None。ここが落ちると実演が止まる。"""
