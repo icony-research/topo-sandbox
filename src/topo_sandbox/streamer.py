@@ -17,10 +17,11 @@
     offset 4    N バイト     UTF-8 の JSON ヘッダ（4 + N が 4 の倍数になるよう空白で詰める）
     offset 4+N  rows*cols*4  float32 LE の高さ[mm]。行優先。正が高い
     （続けて）  rows*cols*4  float32 LE の水深[mm]。ヘッダに "flood": true があるときだけ
+    （続けて）  rows*cols*4  float32 LE の川らしさ 0〜1。ヘッダに "rivers": true があるときだけ
 
 ヘッダの例::
 
-    {"type": "height", "version": 2, "rows": 240, "cols": 320, "index": 12,
+    {"type": "height", "version": 3, "rows": 240, "cols": 320, "index": 12,
      "unit": "mm", "cropped": true, "origin": "reference", "waterLevelMm": -40.0,
      "flood": true}
 
@@ -28,6 +29,11 @@
 投影に描いているものと同じ（描かないところは 0）。高さと同じ格子・同じ向きに
 揃えてある。水を流していないときは ``flood`` を付けず、水深も送らない
 （送る量を増やさないため）。
+
+川らしさは雨の筋（:mod:`~topo_sandbox.processing.rivers`、``r`` キー）で、
+投影の DEM に重ねているものと同じ（描かないところは 0、水面より下も 0）。
+水深と同じく高さと同じ格子・同じ向きに揃え、描いていないときは ``rivers`` を
+付けず送らない。水深と両方あるときは水深が先。
 
 受け取る側の定義は topo-sandbox-live の ``backend/app/sources/topo_sandbox.py``。
 形を変えるときは両方を揃え、:data:`PROTOCOL_VERSION` を上げる。
@@ -53,8 +59,8 @@ import numpy as np
 from . import config
 
 #: 送る形式の版。受け取る側が形の違いに気付けるようにする。
-#: 2 で水源の水の水深（"flood"）を足した。
-PROTOCOL_VERSION = 2
+#: 2 で水源の水の水深（"flood"）を、3 で川らしさ（"rivers"）を足した。
+PROTOCOL_VERSION = 3
 
 _HEADER_LEN = struct.Struct("<I")
 
@@ -72,7 +78,7 @@ _POLL_S = 0.5
 _JOIN_TIMEOUT_S = 5.0
 
 
-def encode_frame(height_mm, header, flood_mm=None):
+def encode_frame(height_mm, header, flood_mm=None, river=None):
     """高さ[mm]とヘッダを 1 メッセージのバイト列にする。
 
     Args:
@@ -80,6 +86,8 @@ def encode_frame(height_mm, header, flood_mm=None):
         header: JSON にできる辞書。``rows`` と ``cols`` はここで足す。
         flood_mm: 水源の水の水深[mm] (rows, cols)。渡したときだけ高さの後ろに
             続け、ヘッダに ``"flood": true`` を足す。
+        river: 川らしさ 0〜1 (rows, cols)。渡したときだけ（水深があればその後ろに）
+            続け、ヘッダに ``"rivers": true`` を足す。
 
     Returns:
         送るバイト列。
@@ -88,12 +96,14 @@ def encode_frame(height_mm, header, flood_mm=None):
     rows, cols = heights.shape
     header = dict(header, rows=int(rows), cols=int(cols))
     payload = heights.tobytes()
-    if flood_mm is not None:
-        water = np.ascontiguousarray(flood_mm, dtype=_FLOAT32_LE)
-        if water.shape != heights.shape:
-            raise ValueError(f"水深の大きさ {water.shape} が高さ {heights.shape} と違います")
-        header["flood"] = True
-        payload += water.tobytes()
+    for key, name, layer in (("flood", "水深", flood_mm), ("rivers", "川らしさ", river)):
+        if layer is None:
+            continue
+        grid = np.ascontiguousarray(layer, dtype=_FLOAT32_LE)
+        if grid.shape != heights.shape:
+            raise ValueError(f"{name}の大きさ {grid.shape} が高さ {heights.shape} と違います")
+        header[key] = True
+        payload += grid.tobytes()
 
     header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     header_bytes += b" " * ((-(_HEADER_LEN.size + len(header_bytes))) % _ALIGN)
@@ -171,7 +181,7 @@ class DemStreamer:
         #: 最後の失敗の内容。画面やコンソールに出して原因を伝えるために残す。
         self.last_error = None
 
-        # 送るのを待っている 1 枚（ヘッダ, 高さ, 水深）。新しいものが来たら置き換える。
+        # 送るのを待っている 1 枚（ヘッダ, 高さ, 水深, 川らしさ）。新しいものが来たら置き換える。
         self._pending = None
         self._lock = threading.Lock()
         self._wakeup = threading.Event()
@@ -201,7 +211,15 @@ class DemStreamer:
         self._thread = threading.Thread(target=self._run, name="dem-streamer", daemon=True)
         self._thread.start()
 
-    def send(self, height_mm, cropped=False, reference=False, water_level_mm=None, flood_mm=None):
+    def send(
+        self,
+        height_mm,
+        cropped=False,
+        reference=False,
+        water_level_mm=None,
+        flood_mm=None,
+        river=None,
+    ):
         """高さ[mm]を 1 枚、送信待ちへ置く。
 
         描画のワーカスレッドから呼ばれる。**待たず、例外も出さない。**
@@ -213,6 +231,7 @@ class DemStreamer:
             reference: 高さの原点が基準面か（False ならフレームの中央値）。
             water_level_mm: そのときの水位[mm]。
             flood_mm: 水源の水の水深[mm] (H, W)。高さと同じ大きさ。流していなければ None。
+            river: 川らしさ 0〜1 (H, W)。高さと同じ大きさ。描いていなければ None。
 
         Returns:
             置けたら True。止まっているなら False。
@@ -223,6 +242,7 @@ class DemStreamer:
         # 呼び出し側の配列を送信スレッドが持ち続けないよう、ここで写しを作る。
         frame = np.array(height_mm, dtype=np.float32)
         water = None if flood_mm is None else np.array(flood_mm, dtype=np.float32)
+        strength = None if river is None else np.array(river, dtype=np.float32)
 
         self._index += 1
         header = {
@@ -238,7 +258,7 @@ class DemStreamer:
         with self._lock:
             if self._pending is not None and self.connected:
                 self.dropped += 1
-            self._pending = (header, frame, water)
+            self._pending = (header, frame, water, strength)
         self._wakeup.set()
         return True
 
@@ -301,8 +321,8 @@ class DemStreamer:
                 if not connection.poll():
                     raise ConnectionError("相手が接続を閉じました")
                 if item is not None:
-                    header, frame, water = item
-                    connection.send(encode_frame(frame, header, water))
+                    header, frame, water, strength = item
+                    connection.send(encode_frame(frame, header, water, strength))
                     self.sent += 1
             except Exception as error:
                 self.last_error = error

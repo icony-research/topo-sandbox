@@ -353,11 +353,14 @@ class Renderer:
             # 砂場を作り変えたあとの地形に前の水が残っていると不自然になる。
             self._flood.reset()
 
+        # 川（D8）。水と同じく配信にも同じ川を載せるので、描く前にここで求めておく。
+        river = self._river_strength(height_mm, settings)
+
         # ライブ表示アプリへ送る（--stream のときだけ）。録画と違って表示モードを
         # 問わないのは、実演中に v で切り替えるたびに別画面の地形が止まると困るため。
         # 描く前に渡すのは、重いフレームの描画を待って送るのが遅れないようにするため。
         if self.streamer is not None:
-            self._stream(height_mm, settings, flood_mm)
+            self._stream(height_mm, settings, flood_mm, river)
 
         # 画面に出す深度・DEM・等高線は 8bit の階調を使う。
         # 高さの符号を反転して「大きいほど低い」に揃える。
@@ -367,7 +370,7 @@ class Renderer:
         if mode is ViewMode.COLORING:
             return self._render_coloring(height_mm, settings)
         if mode is ViewMode.DEM:
-            return self._render_dem(height_mm, display, settings, flood_mm)
+            return self._render_dem(height_mm, display, settings, flood_mm, river)
         if mode is ViewMode.DEPTH:
             return self._render_depth(height_mm, display, settings)
         if mode is ViewMode.EDGE:
@@ -479,7 +482,35 @@ class Renderer:
             area_uv=area,
         )
 
-    def _render_dem(self, height_mm, display, settings, flood_mm=None):
+    @staticmethod
+    def _river_strength(height_mm, settings):
+        """DEM 表示に重ねる川らしさ 0〜1 (H, W) を返す。描かないなら None。
+
+        投影と配信が同じ川を使うよう、`render` の頭で 1 度だけ求める。
+
+        基準面が無いときは、水面を出さない正規化 DEM の上にそのまま描く。
+        流量は絶対的な高さを要らない（下る向きだけで決まる）ので、基準面が
+        無くても川は出せる。
+
+        基準面があるときは、水面より下の川を消す（湖や海に入った川は見えなくなる）。
+        水源の水を流しているあいだは描かない。「雨が降ったらどこを流れるか」と
+        「いま流れている水」が重なると、どちらが本物の水か見分けられない。
+        全部沈んでいるなら流量の計算そのものが要らない。
+        """
+        if not settings.show_rivers or settings.view_mode is not ViewMode.DEM:
+            return None
+
+        _, min_cells, full_cells = settings.river_setting
+        if settings.reference_plane is None:
+            return rivers.river_strength(height_mm, min_cells, full_cells)
+
+        dry = height_mm >= settings.water_level_mm
+        if settings.show_flood or not dry.any():
+            return None
+        flow = rivers.river_strength(height_mm, min_cells, full_cells)
+        return np.where(dry, flow, 0.0).astype(np.float32)
+
+    def _render_dem(self, height_mm, display, settings, flood_mm=None, river=None):
         # 点群表示アプリのテスト入力として書き出す（--record のときだけ）。
         # 描く前に積むのは、重いフレームの描画を待って書き出しが遅れないようにするため。
         if self.recorder is not None:
@@ -495,32 +526,18 @@ class Renderer:
             # 水位が漂ってしまう。水面は出さず、従来どおりフレーム内で正規化する。
             dem = overlays.dem_color(depth_view)
 
-            # 流量は絶対的な高さを要らない（下る向きだけで決まる）ので、
-            # 基準面が無くても川は出せる。こちらは投影解像度で混ぜるしかない。
-            if settings.show_rivers:
-                _, min_cells, full_cells = settings.river_setting
-                strength = self._to_projection(
-                    rivers.river_strength(height_mm, min_cells, full_cells), settings
-                )
-                dem = overlays.draw_rivers(dem, strength)
+            # 川（描くかどうかは `_river_strength` が決める）。
+            # こちらは正規化 DEM が投影解像度なので、投影解像度で混ぜるしかない。
+            if river is not None:
+                dem = overlays.draw_rivers(dem, self._to_projection(river, settings))
         else:
             elapsed = self._elapsed()
             terrain = overlays.terrain_color(height_mm, elapsed, settings.water_level_mm)
 
-            dry = height_mm >= settings.water_level_mm
-            # 水源の水を流しているあいだは、雨の筋（D8）は描かない。「雨が降ったら
-            # どこを流れるか」と「いま流れている水」が重なると、どちらが本物の
-            # 水か見分けられない。
-            if settings.show_rivers and not settings.show_flood and dry.any():
-                # 水面より下の川は描かない。湖や海に入った川は見えなくなる。
-                # 全部沈んでいるなら流量の計算そのものが要らない。
-                _, min_cells, full_cells = settings.river_setting
-                flow = rivers.river_strength(height_mm, min_cells, full_cells)
-                strength = np.where(dry, flow, 0.0)
-
+            if river is not None:
                 # 川は拡大する前に混ぜる。投影解像度で混ぜると触る画素が
                 # 6 倍になり、それだけで 1 フレームの予算の半分を使う。
-                terrain = overlays.draw_rivers(terrain, strength)
+                terrain = overlays.draw_rivers(terrain, river)
 
             if flood_mm is not None:
                 # 川と同じく、拡大する前に混ぜる。
@@ -564,7 +581,7 @@ class Renderer:
             frame_context(settings.reference_plane, settings.water_level_mm, area),
         )
 
-    def _stream(self, height_mm, settings, flood_mm=None):
+    def _stream(self, height_mm, settings, flood_mm=None, river=None):
         """ライブ表示アプリへ高さ[mm]を 1 枚渡す。
 
         砂場の四隅が決まっていれば内側だけを切り取って送る。決まっていなければ
@@ -576,19 +593,24 @@ class Renderer:
         `crop_to_area` が反転済みなので、視野全体のときだけここで反転する。
         揃えないと、四隅を指定した瞬間にライブ表示の地形が左右に裏返る。
 
-        水源の水（``flood_mm``）を流していれば、高さと同じ切り取り・向きで一緒に送る。
+        水源の水（``flood_mm``）や川（``river``）を描いていれば、高さと同じ切り取り・
+        向きで一緒に送る。
         """
-        frame = water = None
+        frame = water = strength = None
         if settings.has_area:
             frame = crop_to_area(height_mm, settings.area_positions)
             if frame is not None and flood_mm is not None:
                 water = crop_to_area(flood_mm, settings.area_positions)
+            if frame is not None and river is not None:
+                strength = crop_to_area(river, settings.area_positions)
 
         cropped = frame is not None
         if not cropped:
             frame = height_mm[:, ::-1]
             if flood_mm is not None:
                 water = flood_mm[:, ::-1]
+            if river is not None:
+                strength = river[:, ::-1]
 
         self.streamer.send(
             frame,
@@ -596,6 +618,7 @@ class Renderer:
             reference=settings.reference_plane is not None,
             water_level_mm=settings.water_level_mm,
             flood_mm=water,
+            river=strength,
         )
 
     def _render_depth(self, height_mm, display, settings):
