@@ -296,6 +296,9 @@ class Renderer:
         self._stabilizer = depth.TemporalStabilizer()
         self._contours = overlays.ContourBands()
 
+        # 砂を動かす手を地形として描かない。これも前のフレームの地形を覚えている。
+        self._hand_hold = depth.HandHold()
+
         # 水源から流れた水。これも前のフレームの水深を覚えている。
         self._flood = flood.FloodSimulator()
 
@@ -336,6 +339,11 @@ class Renderer:
         # 欠測の穴埋めにも基準面を使う。周囲から埋められない大きな穴を
         # 中央値で埋めると、視野に入った砂場の外に引きずられて窪地になる。
         depth_mm = depth.preprocess(depth_frame, settings.reference_plane)
+
+        # 急に高くなったところ（手）は、落ち着くまで前の地形を保つ。高さを求める
+        # 前に除くので、投影・水・川・等高線・録画・配信のどれにも手は入らない。
+        # 揺れを均すより先に置くのは、手を除いたあとの地形を均すため。
+        depth_mm = self._hand_hold.apply(depth_mm, self._elapsed())
 
         # 動いていないところの揺れを均す。砂を動かした画素はそのまま通るので、
         # 追従は遅れない。

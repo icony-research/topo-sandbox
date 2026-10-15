@@ -187,6 +187,32 @@ class TestMissingDepthIsNotWater:
         assert not (blue > red and blue > green), f"頂上が水になっている: {(red, green, blue)}"
 
 
+class TestHandIsNotTerrain:
+    """砂を動かす手が、手の形の山として投影されないこと（実演で出た不具合）。"""
+
+    def _with_hand(self, tip):
+        """左から伸びてくる手。指先から手首へ向けて高くなる（センサ解像度）。"""
+        frame = _frame_with_pool()
+        columns = np.arange(frame.shape[1])
+        rise = np.where(columns < tip, 40.0 + 2.0 * (tip - columns), 0.0)
+        frame[200:260] -= rise.astype(np.float32)
+        return frame
+
+    def test_動いている手は投影に出ない(self):
+        settings = _dem_settings(show_contour=True)
+        empty_clock, hand_clock = _FakeClock(), _FakeClock()
+        empty, with_hand = Renderer(clock=empty_clock), Renderer(clock=hand_clock)
+        empty.render(_frame_with_pool(), settings)
+        with_hand.render(_frame_with_pool(), settings)
+
+        for frame in range(30):  # 1 秒、手を差し入れ続ける
+            empty_clock.advance(1.0 / 30.0)
+            hand_clock.advance(1.0 / 30.0)
+            expected = empty.render(_frame_with_pool(), settings)
+            actual = with_hand.render(self._with_hand(100 + frame * 8), settings)
+            np.testing.assert_array_equal(actual, expected)
+
+
 class TestReset:
     """初期値へ戻す 2 段階。"""
 
