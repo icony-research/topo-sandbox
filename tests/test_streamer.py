@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from topo_sandbox import config
+from topo_sandbox import renderer as renderer_module
 from topo_sandbox.processing.plane import ReferencePlane
 from topo_sandbox.renderer import Renderer, RenderSettings, ViewMode
 from topo_sandbox.streamer import PROTOCOL_VERSION, DemStreamer, encode_frame
@@ -34,14 +35,20 @@ def _decode(message):
 
 def _decode_with_flood(message):
     """水深も読む。水深が無ければ None。"""
+    header, heights, flood, _, header_len = _decode_layers(message)
+    return header, heights, flood, header_len
+
+
+def _decode_layers(message):
+    """高さ・水深・川らしさをすべて読む。無いものは None。"""
     (header_len,) = struct.unpack_from("<I", message, 0)
     header = json.loads(message[4 : 4 + header_len].decode("utf-8"))
     rows, cols = header["rows"], header["cols"]
-    layers = 2 if header.get("flood") else 1
+    names = ["heights"] + [key for key in ("flood", "rivers") if header.get(key)]
     data = np.frombuffer(message, dtype="<f4", offset=4 + header_len)
-    assert data.size == layers * rows * cols
-    grids = data.reshape(layers, rows, cols)
-    return header, grids[0], (grids[1] if layers == 2 else None), header_len
+    assert data.size == len(names) * rows * cols
+    grids = dict(zip(names, data.reshape(len(names), rows, cols), strict=True))
+    return header, grids["heights"], grids.get("flood"), grids.get("rivers"), header_len
 
 
 def _wait_until(predicate):
@@ -155,6 +162,38 @@ class TestEncode:
         with pytest.raises(ValueError):
             encode_frame(_height(1.0, (2, 2)), {}, _height(0.0, (2, 3)))
 
+    def test_川らしさは水深の後ろに続ける(self):
+        heights = _height(3.0, (2, 3))
+        water = np.arange(6, dtype=np.float32).reshape(2, 3)
+        strength = np.linspace(0.0, 1.0, 6, dtype=np.float32).reshape(2, 3)
+        header, decoded, flood, river, _ = _decode_layers(
+            encode_frame(heights, {}, water, strength)
+        )
+
+        assert header["flood"] is True and header["rivers"] is True
+        np.testing.assert_array_equal(decoded, heights)
+        np.testing.assert_array_equal(flood, water)
+        np.testing.assert_array_equal(river, strength)
+
+    def test_川らしさだけでも送れる(self):
+        """基準面が無いときは水を流さずに川だけを描く。"""
+        strength = np.full((2, 3), 0.5, dtype=np.float32)
+        header, _, flood, river, _ = _decode_layers(
+            encode_frame(_height(1.0, (2, 3)), {}, river=strength)
+        )
+        assert "flood" not in header and header["rivers"] is True
+        assert flood is None
+        np.testing.assert_array_equal(river, strength)
+
+    def test_川らしさが無ければriversを付けない(self):
+        header, _, _, river, _ = _decode_layers(encode_frame(_height(1.0, (2, 2)), {}))
+        assert "rivers" not in header
+        assert river is None
+
+    def test_川らしさの大きさが高さと違えば断る(self):
+        with pytest.raises(ValueError):
+            encode_frame(_height(1.0, (2, 2)), {}, river=_height(0.0, (2, 3)))
+
     def test_float64でもfloat32で送る(self):
         heights = np.full((2, 3), 1.25, dtype=np.float64)
         message = encode_frame(heights, {})
@@ -187,6 +226,16 @@ class TestSend:
         header, _, flood, _ = _decode_with_flood(server.latest.sent[0])
         assert header["flood"] is True
         np.testing.assert_array_equal(flood, water)
+
+    def test_川らしさも届く(self, streamer, server):
+        strength = _height(0.75)
+        streamer.send(_height(1.0), reference=True, river=strength)
+        assert _wait_until(lambda: server.latest.sent)
+
+        header, _, flood, river, _ = _decode_layers(server.latest.sent[0])
+        assert header["rivers"] is True
+        assert flood is None
+        np.testing.assert_array_equal(river, strength)
 
     def test_基準面が無ければ原点が中央値だと分かる(self, streamer, server):
         streamer.send(_height(0.0))
@@ -356,7 +405,15 @@ class _SpyStreamer:
     def __init__(self):
         self.calls = []
 
-    def send(self, height_mm, cropped=False, reference=False, water_level_mm=None, flood_mm=None):
+    def send(
+        self,
+        height_mm,
+        cropped=False,
+        reference=False,
+        water_level_mm=None,
+        flood_mm=None,
+        river=None,
+    ):
         self.calls.append(
             {
                 "height_mm": np.array(height_mm),
@@ -364,6 +421,7 @@ class _SpyStreamer:
                 "reference": reference,
                 "water_level_mm": water_level_mm,
                 "flood_mm": None if flood_mm is None else np.array(flood_mm),
+                "river": None if river is None else np.array(river),
             }
         )
         return True
@@ -426,6 +484,29 @@ def _flood_settings(area=None):
     settings = _settings(area=area)
     settings.show_flood = True
     settings.spring_position = [0.5, 0.5]
+    return settings
+
+
+@pytest.fixture
+def stub_rivers(monkeypatch):
+    """川の計算を「センサから見て左半分だけが川（0.8）」に置き換え、呼ばれ方を覚える。"""
+    calls = []
+
+    def fake(height_mm, min_cells=None, full_cells=None):
+        calls.append((min_cells, full_cells))
+        strength = np.zeros(np.shape(height_mm), dtype=np.float32)
+        strength[:, : strength.shape[1] // 2] = 0.8
+        return strength
+
+    monkeypatch.setattr(renderer_module.rivers, "river_strength", fake)
+    return calls
+
+
+def _river_settings(area=None, reference=True):
+    settings = _settings(area=area)
+    settings.show_rivers = True
+    if not reference:
+        settings.reference_plane = None
     return settings
 
 
@@ -521,6 +602,90 @@ class TestRendererIntegration:
         assert flood[:, columns * 3 // 4].mean() == pytest.approx(5.0, abs=0.1)
         assert heights[:, columns * 3 // 4].mean() == pytest.approx(50.0, abs=1.0)
         assert flood[:, columns // 4].mean() == pytest.approx(0.0, abs=0.1)
+
+    def test_川を描いていなければ川らしさは送らない(self):
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _settings())
+        assert spy.calls[0]["river"] is None
+
+    def test_川を投影と同じ向きで送る(self, stub_rivers):
+        """高さと同じく左右反転して送る。揃えないと川が地形の反対側に乗る。"""
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _river_settings())
+
+        river = spy.calls[0]["river"]
+        assert river.shape == spy.calls[0]["height_mm"].shape
+        width = river.shape[1]
+        # センサの左半分の川は、投影像では右半分に来る（盛った砂と同じ側）
+        assert river[:, width * 3 // 4].mean() == pytest.approx(0.8)
+        assert river[:, width // 4].mean() == pytest.approx(0.0)
+        # 投影と配信で同じ川を使う。重いので 1 フレームで 2 度は数えない。
+        assert len(stub_rivers) == 1
+
+    def test_川の出やすさを投影と揃える(self, stub_rivers):
+        settings = _river_settings()
+        settings.cycle_river_preset()
+        Renderer(streamer=_SpyStreamer()).render(_sensor_frame(), settings)
+        _, min_cells, full_cells = settings.river_setting
+        assert stub_rivers == [(min_cells, full_cells)]
+
+    def test_切り取るときは川も同じく切り取る(self, stub_rivers):
+        width, height = config.VIEW_SIZE
+        whole = [[0, 0], [0, height], [width, height], [width, 0]]
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _river_settings(area=whole))
+
+        call = spy.calls[0]
+        assert call["cropped"] is True
+        river, heights = call["river"], call["height_mm"]
+        assert river.shape == heights.shape
+        columns = river.shape[1]
+        # 川のある側と盛った砂の側が一致する
+        assert river[:, columns * 3 // 4].mean() == pytest.approx(0.8, abs=0.01)
+        assert heights[:, columns * 3 // 4].mean() == pytest.approx(50.0, abs=1.0)
+        assert river[:, columns // 4].mean() == pytest.approx(0.0, abs=0.01)
+
+    def test_水面より下の川は送らない(self, stub_rivers):
+        """投影でも水面より下の川は描かない（湖や海に入った川は見えなくなる）。"""
+        settings = _river_settings()
+        # 盛った側（+50mm）だけが水面より上に出る
+        settings.water_level_mm = 25.0
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), settings)
+
+        river, heights = spy.calls[0]["river"], spy.calls[0]["height_mm"]
+        assert river is not None and river.max() > 0.0
+        assert np.all(river[heights < settings.water_level_mm] == 0.0)
+
+    def test_水源の水を流しているあいだは川を送らない(self, stub_rivers):
+        """投影でも描かない。どちらが本物の水か見分けられなくなるため。"""
+        settings = _river_settings()
+        settings.show_flood = True
+        settings.spring_position = [0.5, 0.5]
+        spy = _SpyStreamer()
+        renderer = Renderer(streamer=spy)
+        renderer._flood = _StubFlood(_left_half_water())
+        renderer.render(_sensor_frame(), settings)
+
+        assert spy.calls[0]["river"] is None
+        assert spy.calls[0]["flood_mm"] is not None
+        assert stub_rivers == []
+
+    def test_基準面が無くても川は送る(self, stub_rivers):
+        """流量は下る向きだけで決まるので、投影でも基準面なしで川を描いている。"""
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), _river_settings(reference=False))
+        assert spy.calls[0]["reference"] is False
+        assert spy.calls[0]["river"] is not None
+
+    def test_DEM以外では川を送らない(self, stub_rivers):
+        """川を描くのは DEM 表示だけ。投影に無い川を別画面にだけ出さない。"""
+        settings = _river_settings()
+        settings.view_mode = ViewMode.DEPTH
+        spy = _SpyStreamer()
+        Renderer(streamer=spy).render(_sensor_frame(), settings)
+        assert spy.calls[0]["river"] is None
+        assert stub_rivers == []
 
     def test_配信なしでも描ける(self):
         """普段の起動は streamer が None。ここが落ちると実演が止まる。"""
